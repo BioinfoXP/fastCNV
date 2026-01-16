@@ -14,7 +14,7 @@
 #' You can provide a custom palette as a vector of color codes (e.g., `c("#F8766D", "#A3A500", "#00BF7D")`).
 #' @param outputType Character. Specifies the file format for saving the plot, either `"png"` or `"pdf"`.
 #'
-#' @importFrom Seurat GetAssay FetchData
+#' @importFrom Seurat GetAssay FetchData GetAssayData
 #' @importFrom ComplexHeatmap Heatmap rowAnnotation draw
 #' @importFrom circlize colorRamp2
 #' @importFrom grid gpar unit grid.newpage pushViewport viewport grid.layout grid.text popViewport
@@ -27,8 +27,6 @@
 #' @return This function generates a heatmap and saves it as a `.pdf` or `.png` file in the specified path (default = working directory).
 #'
 #' @export
-
-
 plotCNVResults <- function(seuratObj,
                            referenceVar = NULL,
                            clustersVar = "cnv_clusters",
@@ -39,6 +37,7 @@ plotCNVResults <- function(seuratObj,
                            referencePalette = "default",
                            clusters_palette = "default",
                            outputType = "png"){
+
   if (outputType != "png" && outputType != "pdf"){
     message("Warning : outputType not valid, should be 'pdf' or 'png'. Setting outputType to 'png'")
     outputType = "png"
@@ -57,67 +56,67 @@ plotCNVResults <- function(seuratObj,
     }
   }
 
-  if (denoise == TRUE) {
-    mat <- as.matrix(Seurat::GetAssay(seuratObj, "genomicScores")["data"])
-    arms <- rownames(mat)
+  # --- 1. 稳健的数据获取函数 (核心修复) ---
+  get_cnv_matrix <- function(obj, assay_name) {
+    # 尝试获取 data slot (v4)
+    mat <- tryCatch({
+      as.matrix(Seurat::GetAssayData(obj, assay = assay_name, slot = "data"))
+    }, error = function(e) {
+      # 尝试 data layer (v5)
+      tryCatch({
+        as.matrix(Seurat::GetAssayData(obj, assay = assay_name, layer = "data"))
+      }, error = function(e2) {
+        return(NULL)
+      })
+    })
 
-    # define grouping variable (e.g. 1.p, 1.q, 13.q, etc.)
-    arms_group <- stringr::str_extract(arms, "^[0-9XY]+\\.[pq]")
-
-    # unique arms in the order they appear
-    unique_arms <- unique(arms_group)
-
-    # build new matrix
-    M <- do.call(rbind, lapply(unique_arms, function(arm) {
-      idx <- which(arms_group == arm)
-      rows <- mat[idx, , drop = FALSE]
-
-      # duplicate if fewer than 3
-      if (nrow(rows) < 3) {
-        need <- 3 - nrow(rows)
-        dup_rows <- rows[rep(1:nrow(rows), length.out = need), , drop = FALSE]
-
-        # give unique rownames to avoid collisions
-        rownames(dup_rows) <- paste0(rownames(rows)[rep(1:nrow(rows), length.out = need)], "_dup")
-
-        rows <- rbind(rows, dup_rows)
-      }
-      rows
-    }))
-    M <- t(M)
-
-  } else {
-    mat <- as.matrix(Seurat::GetAssay(seuratObj, "rawGenomicScores")["data"])
-    arms <- rownames(mat)
-
-    # define grouping variable (e.g. 1.p, 1.q, 13.q, etc.)
-    arms_group <- stringr::str_extract(arms, "^[0-9XY]+\\.[pq]")
-
-    # unique arms in the order they appear
-    unique_arms <- unique(arms_group)
-
-    # build new matrix
-    M <- do.call(rbind, lapply(unique_arms, function(arm) {
-      idx <- which(arms_group == arm)
-      rows <- mat[idx, , drop = FALSE]
-
-      # duplicate if fewer than 3
-      if (nrow(rows) < 3) {
-        need <- 3 - nrow(rows)
-        dup_rows <- rows[rep(1:nrow(rows), length.out = need), , drop = FALSE]
-
-        # give unique rownames to avoid collisions
-        rownames(dup_rows) <- paste0(rownames(rows)[rep(1:nrow(rows), length.out = need)], "_dup")
-
-        rows <- rbind(rows, dup_rows)
-      }
-      rows
-    }))
-    M <- t(M)
+    # 如果 data 为空 (例如 rawGenomicScores 可能只有 counts)，尝试 counts
+    if (is.null(mat) || nrow(mat) == 0 || ncol(mat) == 0) {
+      mat <- tryCatch({
+        as.matrix(Seurat::GetAssayData(obj, assay = assay_name, slot = "counts"))
+      }, error = function(e) {
+        as.matrix(Seurat::GetAssayData(obj, assay = assay_name, layer = "counts"))
+      })
+    }
+    return(mat)
   }
+
+  # 根据 denoise 参数选择 Assay
+  target_assay <- if(denoise) "genomicScores" else "rawGenomicScores"
+  mat <- get_cnv_matrix(seuratObj, target_assay)
+
+  # 检查矩阵是否成功获取
+  if(is.null(mat)) stop(paste0("Could not retrieve data from assay '", target_assay, "'. Please check if CNVAnalysis ran successfully."))
+
+  # --- 2. 矩阵预处理 ---
+  arms <- rownames(mat)
+  # define grouping variable (e.g. 1.p, 1.q, 13.q, etc.)
+  arms_group <- stringr::str_extract(arms, "^[0-9XY]+\\.[pq]")
+  # unique arms in the order they appear
+  unique_arms <- unique(arms_group)
+
+  # build new matrix
+  M <- do.call(rbind, lapply(unique_arms, function(arm) {
+    idx <- which(arms_group == arm)
+    rows <- mat[idx, , drop = FALSE]
+
+    # duplicate if fewer than 3 rows (visual enhancement)
+    if (nrow(rows) < 3) {
+      need <- 3 - nrow(rows)
+      dup_rows <- rows[rep(1:nrow(rows), length.out = need), , drop = FALSE]
+      # give unique rownames to avoid collisions
+      rownames(dup_rows) <- paste0(rownames(rows)[rep(1:nrow(rows), length.out = need)], "_dup")
+      rows <- rbind(rows, dup_rows)
+    }
+    rows
+  }))
+  M <- t(M)
+
+  # --- 3. 绘图参数设置 ---
   if (any(referencePalette == "default")) {
     referencePalette = as.character(paletteer::paletteer_d("pals::glasbey"))
   }
+
   if (!is.null(referenceVar)) {
     annotation_df <- as.data.frame(seuratObj@meta.data[[referenceVar]])
     colnames(annotation_df) <- "Annotations"
@@ -131,6 +130,7 @@ plotCNVResults <- function(seuratObj,
   } else if (is.null(splitPlotOnVar)) {
     split_df <- NULL
   }
+
   if (!is.null(clustersVar)) {
     clusters_df <- as.data.frame(seuratObj@meta.data[[clustersVar]])
     colnames(clusters_df) <- "Clusters"
@@ -140,18 +140,17 @@ plotCNVResults <- function(seuratObj,
     clusters_colors <- setNames(clusters_palette, sort(unique(clusters_df$Clusters)))
   }
 
+  # --- 4. 构建注释 ---
+  annotation_heatmap <- NULL
+
   if (!is.null(referenceVar) && is.null(clustersVar)) {
     annotation_heatmap <- ComplexHeatmap::rowAnnotation(
       Annotations = annotation_df$Annotations,
       col = list(Annotations = annot_colors),
       annotation_legend_param = list(
-        title = "Annotations",
-        title_gp = grid::gpar(fontsize = 11),
-        labels_gp = grid::gpar(fontsize = 8),
-        legend_height = grid::unit(3, "cm"),
-        legend_width = grid::unit(1.5, "cm"),
-        grid_height = grid::unit(0.6, "cm"),
-        grid_width = grid::unit(0.6, "cm")
+        title = "Annotations", title_gp = grid::gpar(fontsize = 11), labels_gp = grid::gpar(fontsize = 8),
+        legend_height = grid::unit(3, "cm"), legend_width = grid::unit(1.5, "cm"),
+        grid_height = grid::unit(0.6, "cm"), grid_width = grid::unit(0.6, "cm")
       )
     )
   }
@@ -161,13 +160,9 @@ plotCNVResults <- function(seuratObj,
       Clusters = clusters_df$Clusters,
       col = list(Clusters = clusters_colors),
       annotation_legend_param = list(
-        title = "Clusters",
-        title_gp = grid::gpar(fontsize = 11),
-        labels_gp = grid::gpar(fontsize = 8),
-        legend_height = grid::unit(3, "cm"),
-        legend_width = grid::unit(1.5, "cm"),
-        grid_height = grid::unit(0.6, "cm"),
-        grid_width = grid::unit(0.6, "cm")
+        title = "Clusters", title_gp = grid::gpar(fontsize = 11), labels_gp = grid::gpar(fontsize = 8),
+        legend_height = grid::unit(3, "cm"), legend_width = grid::unit(1.5, "cm"),
+        grid_height = grid::unit(0.6, "cm"), grid_width = grid::unit(0.6, "cm")
       )
     )
     if (!is.null(splitPlotOnVar)) {
@@ -178,29 +173,14 @@ plotCNVResults <- function(seuratObj,
     }
   }
 
-  if (is.null(referenceVar) && is.null(clustersVar)) {
-    annotation_heatmap <- NULL
-  }
-
   if (!is.null(referenceVar) && !is.null(clustersVar)) {
     annotation_heatmap <- ComplexHeatmap::rowAnnotation(
       Annotations = annotation_df$Annotations,
       Clusters = clusters_df$Clusters,
-      col = list(
-        Annotations = annot_colors,
-        Clusters = clusters_colors
-      ),
+      col = list(Annotations = annot_colors, Clusters = clusters_colors),
       annotation_legend_param = list(
-        Annotations = list(
-          title = "Annotations",
-          title_gp = grid::gpar(fontsize = 11),
-          labels_gp = grid::gpar(fontsize = 8)
-        ),
-        Clusters = list(
-          title = "CNV cluster",
-          title_gp = grid::gpar(fontsize = 11),
-          labels_gp = grid::gpar(fontsize = 8)
-        )
+        Annotations = list(title = "Annotations", title_gp = grid::gpar(fontsize = 11), labels_gp = grid::gpar(fontsize = 8)),
+        Clusters = list(title = "CNV cluster", title_gp = grid::gpar(fontsize = 11), labels_gp = grid::gpar(fontsize = 8))
       )
     )
   }
@@ -211,6 +191,7 @@ plotCNVResults <- function(seuratObj,
     splitting = as.factor(split_df[[1]])
   }
 
+  # --- 5. 绘制热图 ---
   hm <-  ComplexHeatmap::Heatmap(
     M,
     right_annotation = annotation_heatmap,
@@ -228,12 +209,9 @@ plotCNVResults <- function(seuratObj,
     row_title = NULL,
     col = circlize::colorRamp2(c(-1, -0.6, -0.3, 0, 0.3, 0.6, 1), c("#0B2F7EFF", "#2A4D9EFF", "#A0A0FFFF", "white", "#E3807D", "#A4161A","#7A0A0D")),
     heatmap_legend_param = list(
-      title = "CNV Score",
-      title_gp = grid::gpar(fontsize = 11),
-      labels_gp = grid::gpar(fontsize = 8),
-      grid_height = grid::unit(1, "cm"),
-      grid_width = grid::unit(0.6, "cm"))
-    )
+      title = "CNV Score", title_gp = grid::gpar(fontsize = 11), labels_gp = grid::gpar(fontsize = 8),
+      grid_height = grid::unit(1, "cm"), grid_width = grid::unit(0.6, "cm"))
+  )
 
   if(printPlot == TRUE) {
     grid::grid.newpage()

@@ -47,158 +47,101 @@
 #' @importFrom crayon red yellow green black
 #'
 #' @export
+fastCNV <- function (seuratObj, sampleName, referenceVar = NULL, referenceLabel = NULL, assay = NULL,
+                     prepareCounts = TRUE, aggregFactor = 15000, seuratClusterResolution = 0.8,
+                     aggregateByVar = TRUE, reClusterSeurat = FALSE, pooledReference = TRUE,
+                     scaleOnReferenceLabel = TRUE, thresholdPercentile = 0.01, geneMetadata = getGenes(),
+                     windowSize = 150, windowStep = 10, saveGenomicWindows = FALSE, topNGenes = 7000,
+                     chrArmsToForce = NULL, genesToForce = NULL, regionToForce = NULL,
+                     getCNVPerChromosomeArm = TRUE, getCNVClusters = TRUE, k_clusters = NULL, h_clusters = NULL,
+                     mergeCNV = TRUE, mergeThreshold = 0.98, doPlot = TRUE, denoise = TRUE, printPlot = FALSE,
+                     savePath = ".", outputType = "png", clustersVar = "cnv_clusters", splitPlotOnVar = clustersVar,
+                     referencePalette = "default", clusters_palette = "default"){
 
-fastCNV <- function (seuratObj,
-                     sampleName,
-                     referenceVar = NULL,
-                     referenceLabel = NULL,
-                     assay = NULL,
-
-                     prepareCounts = TRUE,
-                     aggregFactor = 15000,
-                     seuratClusterResolution = 0.8,
-                     aggregateByVar = TRUE,
-                     reClusterSeurat = FALSE,
-
-                     pooledReference = TRUE,
-                     scaleOnReferenceLabel = TRUE,
-                     thresholdPercentile = 0.01,
-                     geneMetadata = getGenes(),
-                     windowSize = 150,
-                     windowStep = 10,
-                     saveGenomicWindows = FALSE,
-                     topNGenes = 7000,
-                     chrArmsToForce = NULL,
-                     genesToForce = NULL,
-                     regionToForce = NULL,
-
-                     getCNVPerChromosomeArm = TRUE,
-
-                     getCNVClusters = TRUE,
-                     k_clusters = NULL,
-                     h_clusters = NULL,
-
-                     mergeCNV = TRUE,
-                     mergeThreshold = 0.98,
-
-                     doPlot = TRUE,
-                     denoise = TRUE,
-                     printPlot = FALSE,
-                     savePath = ".",
-                     outputType = "png",
-                     clustersVar = "cnv_clusters",
-                     splitPlotOnVar = clustersVar,
-                     referencePalette = "default",
-                     clusters_palette = "default"
-                     ){
-
-  if(!length(seuratObj)==length(sampleName)) stop(crayon::red("seuratObjHD & sampleName should have the same length"))
-
+  if(!length(seuratObj)==length(sampleName)) stop("seuratObj & sampleName length mismatch")
   options(future.globals.maxSize = 8000*1024^2)
 
-  if(length(seuratObj) == 1){
-    seuratObj <- list(seuratObj) ; names(seuratObj) <- sampleName
+  # 列表标准化
+  if(!is.list(seuratObj) || inherits(seuratObj, "Seurat")){
+    seuratObj <- list(seuratObj)
+    names(seuratObj) <- sampleName
   }
+  for (i in 1:length(seuratObj)) seuratObj[[i]]@project.name = sampleName[[i]]
 
-  for (i in 1:length(seuratObj)){
-    seuratObj[[i]]@project.name = sampleName[[i]]
-  }
+  # 追踪 Assay
+  use_assay <- assay
 
-  if (prepareCounts == TRUE & aggregFactor>=1000) {
+  # 1. 运行 PrepareCounts
+  if (prepareCounts == TRUE & aggregFactor >= 1000) {
     message(crayon::yellow(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Aggregating counts matrix...")))
     for (i in 1:length(seuratObj)) {
       seuratObj[[i]] <- prepareCountsForCNVAnalysis(seuratObj[[i]], sampleName = sampleName[[i]],
-                                                   referenceVar = referenceVar,
-                                                   aggregateByVar = aggregateByVar ,
-                                                   aggregFactor=aggregFactor,
-                                                   seuratClusterResolution = seuratClusterResolution,
-                                                   reClusterSeurat = reClusterSeurat  )
+                                                    referenceVar = referenceVar, aggregateByVar = aggregateByVar,
+                                                    aggregFactor = aggregFactor, seuratClusterResolution = seuratClusterResolution,
+                                                    reClusterSeurat = reClusterSeurat)
       invisible(gc())
     }
-    message(crayon::green(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Done !")))
-  } else {
-    for (i in 1:length(seuratObj)) {
-      seuratObj[[i]]@project.name = sampleName[[i]]
-    }
-  }
-
-
-  if (length(seuratObj) > 1) {
-    seuratObj <- CNVAnalysis(seuratObj, referenceVar = referenceVar, referenceLabel = referenceLabel,
-                              pooledReference = pooledReference,
-                              scaleOnReferenceLabel = scaleOnReferenceLabel,
-                              assay = assay, thresholdPercentile = thresholdPercentile, geneMetadata = geneMetadata,
-                              chrArmsToForce = chrArmsToForce, windowSize = windowSize, windowStep = windowStep,
-                              saveGenomicWindows = saveGenomicWindows, topNGenes = topNGenes)
-    invisible(gc())
-  } else {
-    seuratObj <- CNVAnalysis(seuratObj[[1]], referenceVar = referenceVar, referenceLabel = referenceLabel,
-                         #doRecapPlot = doRecapPlot,
-                         pooledReference = pooledReference,
-                         scaleOnReferenceLabel = scaleOnReferenceLabel, assay = assay,
-                         thresholdPercentile = thresholdPercentile, geneMetadata = geneMetadata,
-                         chrArmsToForce = chrArmsToForce, windowSize = windowSize, windowStep = windowStep,
-                         saveGenomicWindows = saveGenomicWindows, topNGenes = topNGenes)
-    invisible(gc())
-  }
-
-  if (getCNVPerChromosomeArm == TRUE) {
-    message(crayon::yellow(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Computing CNV per chromosome arm...")))
-    if (length(seuratObj) == 1) {
-          seuratObj <- CNVPerChromosomeArm(seuratObj)
-    } else {
-      for (i in 1:length(seuratObj)) {
-        seuratObj[[i]] <- CNVPerChromosomeArm(seuratObj[[i]])
-      }
-    }
-    invisible(gc())
+    use_assay <- "AggregatedCounts" # 明确更新
     message(crayon::green(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Done !")))
   }
 
-  if (getCNVClusters == TRUE) {
-    message(crayon::yellow(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Clustering CNVs...")))
-    if (length(seuratObj) == 1) {
-      seuratObj <- CNVCluster(seuratObj, k = k_clusters, h = h_clusters)
-    } else {
-      for (i in 1:length(seuratObj)) {
-        seuratObj[[i]] <- CNVCluster(seuratObj[[i]], k = k_clusters, h = h_clusters)
-      }
-    }
-    invisible(gc())
-    if (mergeCNV == TRUE) {
-      if (length(seuratObj) == 1) {
-        seuratObj <- mergeCNVClusters(seuratObj = seuratObj, mergeThreshold = mergeThreshold)
-      } else {
-        for (i in 1:length(seuratObj)) {
-          seuratObj[[i]] <- mergeCNVClusters(seuratObj = seuratObj[[i]], mergeThreshold = mergeThreshold)
-        }
-      }
-    }
-    message(crayon::green(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Done !")))
+  # 2. 运行 CNV 分析
+  # 【单样本保护】如果是单样本，强制关闭 pooledReference
+  if(length(seuratObj) == 1) {
+    pooledReference <- FALSE
   }
 
-  if (doPlot == TRUE) {
-    message(crayon::yellow(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Plotting CNV heatmap...")))
-    if (length(seuratObj) > 1) {
-      for (i in 1:length(seuratObj)) {
-        if (Seurat::Project(seuratObj[[i]]) == "SeuratProject") {Seurat::Project(seuratObj[[i]]) = paste0("Sample",i)}
-        if ("cnv_clusters" %in% names(seuratObj[[i]]@meta.data)) {splitPlotOnVar = "cnv_clusters"}
-        plotCNVResults(seuratObj[[i]], referenceVar = referenceVar, splitPlotOnVar = splitPlotOnVar,
-                       savePath = savePath, printPlot = printPlot, referencePalette = referencePalette,
-                       clusters_palette = clusters_palette, outputType = outputType, denoise = denoise)
-        invisible(gc())
-      }
-    } else {
-      if ("cnv_clusters" %in% names(seuratObj@meta.data)) {splitPlotOnVar = "cnv_clusters"}
-      plotCNVResults(seuratObj = seuratObj, referenceVar = referenceVar, splitPlotOnVar = splitPlotOnVar,
-                     clustersVar = clustersVar, denoise = denoise, savePath = savePath, printPlot = printPlot,
-                     referencePalette = referencePalette, clusters_palette = clusters_palette, outputType = outputType)
-      invisible(gc())
-    }
-    message(crayon::green(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Done !")))
+  seuratObj <- CNVAnalysis(seuratObj,
+                           referenceVar = referenceVar,
+                           referenceLabel = referenceLabel,
+                           pooledReference = pooledReference, # 动态调整
+                           scaleOnReferenceLabel = scaleOnReferenceLabel,
+                           assay = use_assay, # 明确传递
+                           thresholdPercentile = thresholdPercentile,
+                           geneMetadata = geneMetadata,
+                           windowSize = windowSize,
+                           windowStep = windowStep,
+                           saveGenomicWindows = saveGenomicWindows,
+                           topNGenes = topNGenes,
+                           chrArmsToForce = chrArmsToForce,
+                           genesToForce = genesToForce,
+                           regionToForce = regionToForce)
+  invisible(gc())
+
+  # 3. 后续步骤 (Chromosome Arm, Clustering, Plotting)
+  # (保持原样，省略以节省空间，直接调用即可)
+
+  if (getCNVPerChromosomeArm) {
+    message(crayon::yellow("Computing CNV per chromosome arm..."))
+    for (i in seq_along(seuratObj)) seuratObj[[i]] <- CNVPerChromosomeArm(seuratObj[[i]])
   }
 
+  if (getCNVClusters) {
+    message(crayon::yellow("Clustering CNVs..."))
+    for (i in seq_along(seuratObj)) seuratObj[[i]] <- CNVCluster(seuratObj[[i]], k = k_clusters, h = h_clusters)
+    if (mergeCNV) {
+      for (i in seq_along(seuratObj)) seuratObj[[i]] <- mergeCNVClusters(seuratObj = seuratObj[[i]], mergeThreshold = mergeThreshold)
+    }
+  }
 
+  if (doPlot) {
+    message(crayon::yellow("Plotting CNV heatmap..."))
+    for (i in seq_along(seuratObj)) {
+      # 确保 Project Name
+      if(Seurat::Project(seuratObj[[i]]) == "SeuratProject") Seurat::Project(seuratObj[[i]]) <- paste0("Sample", i)
 
-  return (seuratObj)
+      # 确定 Split 变量
+      p_var <- splitPlotOnVar
+      if ("cnv_clusters" %in% names(seuratObj[[i]]@meta.data)) p_var <- "cnv_clusters"
+
+      plotCNVResults(seuratObj[[i]], referenceVar = referenceVar, splitPlotOnVar = p_var,
+                     clustersVar = clustersVar, savePath = savePath, printPlot = printPlot,
+                     referencePalette = referencePalette, clusters_palette = clusters_palette,
+                     outputType = outputType, denoise = denoise)
+    }
+    message(crayon::green("Done !"))
+  }
+
+  if (length(seuratObj) == 1) return(seuratObj[[1]])
+  return(seuratObj)
 }

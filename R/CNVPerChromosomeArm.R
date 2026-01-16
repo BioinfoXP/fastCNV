@@ -8,9 +8,14 @@
 #'
 #' @export
 
-
 CNVPerChromosomeArm <- function(seuratObj) {
-  genomicScores <- as.matrix(Seurat::GetAssay(seuratObj, assay = "genomicScores")["data"])
+  # --- 1. Safe Data Access (v4/v5 Compatible) ---
+  genomicScores <- tryCatch({
+    as.matrix(Seurat::GetAssayData(seuratObj, assay = "genomicScores", slot = "data"))
+  }, error = function(e) {
+    as.matrix(Seurat::GetAssayData(seuratObj, assay = "genomicScores", layer = "data"))
+  })
+
   window_names <- rownames(genomicScores)
 
   extract_chrom_arm <- function(window_name) {
@@ -21,49 +26,52 @@ CNVPerChromosomeArm <- function(seuratObj) {
 
   window_info <- data.frame(
     window = window_names,
-    chrom_arm = sapply(window_names, extract_chrom_arm)
+    chrom_arm = sapply(window_names, extract_chrom_arm),
+    stringsAsFactors = FALSE
   )
 
-  chrom_arms_all <- unique(c(
-    paste0(1:22, ".p"), paste0(1:22, ".q"),
+  # --- 2. Define Standard Arms (46 total) ---
+  chrom_arms_standard <- c(
+    paste0(rep(1:22, each=2), c(".p", ".q")),
     "X.p", "X.q"
-  ))
+  )
 
+  # --- 3. Compute Averages (Fill missing with 0) ---
   arm_averages <- list()
-  for (chrom_arm in chrom_arms_all) {
-    if (chrom_arm %in% unique(window_info$chrom_arm)) {
+  present_arms <- unique(window_info$chrom_arm)
+
+  for (chrom_arm in chrom_arms_standard) {
+    if (chrom_arm %in% present_arms) {
       windows <- window_info$window[window_info$chrom_arm == chrom_arm]
-      subset_scores <- genomicScores[windows, , drop = FALSE]
-      avg_values <- colMeans(subset_scores, na.rm = TRUE)
+      valid_windows <- intersect(windows, rownames(genomicScores))
+
+      if(length(valid_windows) > 0) {
+        subset_scores <- genomicScores[valid_windows, , drop = FALSE]
+        arm_averages[[chrom_arm]] <- colMeans(subset_scores, na.rm = TRUE)
+      } else {
+        arm_averages[[chrom_arm]] <- rep(0, ncol(genomicScores))
+      }
     } else {
-      avg_values <- rep(0, ncol(genomicScores))
+      # CRITICAL: Fill missing arms with 0 to maintain column structure
+      arm_averages[[chrom_arm]] <- rep(0, ncol(genomicScores))
     }
-    arm_averages[[chrom_arm]] <- avg_values
   }
 
-  arm_averages_df <- do.call(rbind, lapply(names(arm_averages), function(chrom_arm) {
-    data.frame(
-      chrom_arm = chrom_arm,
-      value = arm_averages[[chrom_arm]],
-      barcode = colnames(genomicScores),
-      check.names = FALSE
-    )
-  }))
-
-
+  # --- 4. Write to Metadata ---
   meta <- seuratObj@meta.data
-  meta$barcode <- rownames(meta)
 
-  for (chrom_arm in unique(arm_averages_df$chrom_arm)) {
-    arm_df <- arm_averages_df[arm_averages_df$chrom_arm == chrom_arm, ]
-    lookup <- setNames(arm_df$value, arm_df$barcode)
-    new_col <- paste0(chrom_arm, "_CNV")
-    meta[[new_col]] <- NA
-    idx <- meta$barcode %in% arm_df$barcode
-    meta[[new_col]][idx] <- lookup[meta$barcode[idx]]
+  # Clean up old columns to prevent duplication issues
+  old_cols <- grep("_CNV$", colnames(meta), value = TRUE)
+  if(length(old_cols) > 0) {
+    meta <- meta[, !colnames(meta) %in% old_cols]
   }
 
-  meta$barcode <- NULL
+  # Add columns in standard order
+  for (chrom_arm in chrom_arms_standard) {
+    col_name <- paste0(chrom_arm, "_CNV")
+    meta[[col_name]] <- arm_averages[[chrom_arm]]
+  }
+
   seuratObj@meta.data <- meta
   return(seuratObj)
 }

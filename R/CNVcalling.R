@@ -28,7 +28,6 @@
 #' @importFrom crayon black
 #'
 #' @export
-#'
 CNVCalling <- function(seuratObj,
                        assay = NULL,
                        referenceVar = NULL,
@@ -43,52 +42,8 @@ CNVCalling <- function(seuratObj,
                        chrArmsToForce = NULL,
                        genesToForce = NULL,
                        regionToForce = NULL) {
-  # getting reference cells / spots
-  if (is.null(referenceVar) || is.null(referenceLabel)){
-    message(crayon::black,paste0("referenceVar and/or referenceLabel parameters not found. Computing the CNV without a reference."))
-    # unable to scale the results on reference data if we don't know what the reference data is
-    scaleOnReferenceLabel = FALSE
-  } else {
-    if (length(referenceLabel) == 1) {
-      referenceCells <- Seurat::Cells(seuratObj)[which(Seurat::FetchData(seuratObj, vars = referenceVar) == referenceLabel)]
-      if (length(referenceCells) == 0) {
-        message(crayon::black,paste0("CNVcalling : there is no annotation called ", referenceLabel," in the ", referenceVar," metadata slot of your seurat object.
-Computing the CNV without a reference."))
-        scaleOnReferenceLabel = FALSE
-        rm(referenceCells)
-      }
-    } else {
-      referenceCells <- list()
-      for (i in referenceLabel){
-        if (length(Seurat::Cells(seuratObj)[which(Seurat::FetchData(seuratObj, vars = referenceVar) == i)]) >= 5) {
-                  referenceCells[[i]] <- Seurat::Cells(seuratObj)[which(Seurat::FetchData(seuratObj, vars = referenceVar) == i)]
-        }
-      }
-      if (length(referenceCells) == 0) {
-        message(crayon::black,"Couldn't find any cells annotated as the referenceLabel in the ",referenceVar," metadata slot of the seurat object.
-                Computing the CNV without a reference.")
-        referenceLabel = NULL
-        scaleOnReferenceLabel = FALSE
-        rm(referenceCells)
-      }
-    }
-  }
 
-  # preparation of gene information
-  geneMetadata <- geneMetadata[which(geneMetadata$gene_biotype %in% c("protein_coding","lncRNA") & geneMetadata$chromosome_name %in% c(1:22,"X") & geneMetadata$hgnc_symbol !=""),]
-  geneMetadata$chromosome_num <- geneMetadata$chromosome_name
-  geneMetadata$chromosome_num[which(geneMetadata$chromosome_num=="X")]<- 23
-  geneMetadata$chromosome_num <- as.numeric(geneMetadata$chromosome_num)
-  geneMetadata2 <- unique(geneMetadata[,c("hgnc_symbol","chromosome_num","start_position", "end_position", "chr_arm")])
-
-  # internal functions
-  funTrim <- function(normcounts,lo=-3,up=3){
-    t(apply(normcounts,1, function(z) {
-      z[which(z < lo)] <- lo ; z[which(z > up)]<-up;z } ))
-  }
-
-
-  # analysis
+  # --- 0. 确定 Assay ---
   if (is.null(assay)) {
     if ("AggregatedCounts" %in% Seurat::Assays(seuratObj)) {
       assay = "AggregatedCounts"
@@ -97,50 +52,84 @@ Computing the CNV without a reference."))
     }
   }
 
-  if (dim(Seurat::GetAssay(seuratObj, assay = assay))[1] < topNGenes) {topNGenes = as.numeric(dim(Seurat::GetAssay(seuratObj, assay = assay))[1])}
+  # --- 1. 获取矩阵 (兼容 v4/v5 核心修复) ---
+  rawCounts <- tryCatch({
+    as.matrix(Seurat::GetAssayData(seuratObj, assay = assay, slot = "counts"))
+  }, error = function(e) {
+    as.matrix(Seurat::GetAssayData(seuratObj, assay = assay, layer = "counts"))
+  })
 
-  rawCounts <- as.matrix(Seurat::GetAssay(seuratObj, assay = assay)["counts"])
+  # 获取 Reference Cells (简化逻辑)
+  if (is.null(referenceVar) || is.null(referenceLabel)){
+    message(crayon::black("referenceVar/referenceLabel not found. Computing without reference."))
+    scaleOnReferenceLabel = FALSE
+  } else {
+    if (length(referenceLabel) == 1) {
+      referenceCells <- Seurat::Cells(seuratObj)[which(Seurat::FetchData(seuratObj, vars = referenceVar) == referenceLabel)]
+    } else {
+      referenceCells <- list()
+      for (i in referenceLabel){
+        cells <- Seurat::Cells(seuratObj)[which(Seurat::FetchData(seuratObj, vars = referenceVar) == i)]
+        if(length(cells) >= 5) referenceCells[[i]] <- cells
+      }
+      if(length(referenceCells)==0) scaleOnReferenceLabel = FALSE
+    }
+    if (length(unlist(referenceCells)) == 0) scaleOnReferenceLabel = FALSE
+  }
+
+  # 准备基因信息
+  geneMetadata <- geneMetadata[which(geneMetadata$gene_biotype %in% c("protein_coding","lncRNA") & geneMetadata$chromosome_name %in% c(1:22,"X") & geneMetadata$hgnc_symbol !=""),]
+  geneMetadata$chromosome_num <- geneMetadata$chromosome_name
+  geneMetadata$chromosome_num[which(geneMetadata$chromosome_num=="X")]<- 23
+  geneMetadata$chromosome_num <- as.numeric(geneMetadata$chromosome_num)
+  geneMetadata2 <- unique(geneMetadata[,c("hgnc_symbol","chromosome_num","start_position", "end_position", "chr_arm")])
+
+  funTrim <- function(normcounts,lo=-3,up=3){
+    t(apply(normcounts,1, function(z) {
+      z[which(z < lo)] <- lo ; z[which(z > up)]<-up;z } ))
+  }
+
+  # --- 2. 基因过滤与匹配 ---
+  if (nrow(rawCounts) < topNGenes) { topNGenes = nrow(rawCounts) }
+
+  commonGenes <- intersect(rownames(rawCounts), geneMetadata2$hgnc_symbol)
+
+  # 【防御性检查】
+  if(length(commonGenes) < 10) {
+    stop(paste0("Error: Low gene match. Matrix rows: ", paste(head(rownames(rawCounts),3), collapse=","),
+                ". Metadata: ", paste(head(geneMetadata2$hgnc_symbol,3), collapse=",")))
+  }
+
+  rawCounts <- rawCounts[commonGenes, ]
   invisible(gc())
-  commonGenes <- intersect(rownames(rawCounts),geneMetadata2$hgnc_symbol)
-  rawCounts <- rawCounts[commonGenes,]
 
-  invisible(gc())
-
-  if (!is.null(referenceVar) && !is.null(referenceLabel)){
-    averageExpression <- rowMeans(rawCounts[,unlist(referenceCells)])
+  # 计算平均表达量
+  if (scaleOnReferenceLabel){
+    ref_c <- intersect(unlist(referenceCells), colnames(rawCounts))
+    if(length(ref_c)>0) averageExpression <- rowMeans(rawCounts[, ref_c, drop=FALSE])
+    else averageExpression <- rowMeans(rawCounts)
   } else {
     averageExpression <- rowMeans(rawCounts)
   }
 
-  invisible(gc())
-
   topExprGenes <- commonGenes[order(averageExpression, decreasing = T)[1:topNGenes]]
 
-  if(!is.null(genesToForce)) {
-    topExprGenes <- union(topExprGenes, intersect(commonGenes, genesToForce))
-  }
-
+  # 强制包含基因
+  if(!is.null(genesToForce)) topExprGenes <- union(topExprGenes, intersect(commonGenes, genesToForce))
   if(!is.null(regionToForce)) {
     region_genes <- geneMetadata2 %>%
       filter(.data$chromosome_name == regionToForce[1], .data$start_position >= regionToForce[2], .data$end_position <= regionToForce[3]) %>%
-      pull(.data$hgnc_symbol) %>%
-      unique() %>%
-      setdiff("")
+      pull(.data$hgnc_symbol) %>% unique() %>% setdiff("")
     topExprGenes <- union(topExprGenes, intersect(commonGenes, region_genes))
   }
 
+  # 确保染色体臂基因充足
   topExprGenes_metadata <- geneMetadata2[geneMetadata2$hgnc_symbol %in% topExprGenes, ]
   topExprGenes_metadata$chr_arm_full <- paste0(topExprGenes_metadata$chromosome_num, topExprGenes_metadata$chr_arm)
-
-  genes_by_arm <- split(
-    topExprGenes_metadata$hgnc_symbol,
-    topExprGenes_metadata$chr_arm_full
-  )
+  genes_by_arm <- split(topExprGenes_metadata$hgnc_symbol, topExprGenes_metadata$chr_arm_full)
 
   for (arm in unique(geneMetadata2$chr_arm)) {
-    if (!(arm %in% names(genes_by_arm))) {
-      genes_by_arm[[arm]] <- character(0)
-    }
+    if (!(arm %in% names(genes_by_arm))) genes_by_arm[[arm]] <- character(0)
     if (length(genes_by_arm[[arm]]) < 200) {
       remaining_genes <- commonGenes[!commonGenes %in% genes_by_arm[[arm]]]
       top_arm_genes <- remaining_genes[order(averageExpression[commonGenes %in% remaining_genes], decreasing = TRUE)[1:200]]
@@ -148,6 +137,7 @@ Computing the CNV without a reference."))
     }
   }
 
+  # 强制染色体臂
   if(!is.null(chrArmsToForce)){
     if (length(chrArmsToForce > 1)){
       for (chr in chrArmsToForce){
@@ -160,46 +150,46 @@ Computing the CNV without a reference."))
     }
   }
 
-  final_selected_genes <- unlist(genes_by_arm)
-
-  rawCounts <- rawCounts[final_selected_genes,]
-
+  final_selected_genes <- intersect(unique(unlist(genes_by_arm)), rownames(rawCounts))
+  rawCounts <- rawCounts[final_selected_genes, ]
   invisible(gc())
 
+  # 归一化
   normCounts <- log2(1+rawCounts)
-  invisible(gc())
+  rm(rawCounts); invisible(gc())
   normCounts <- scale(normCounts, scale = FALSE)
 
-  rm(rawCounts)
-  invisible(gc())
-
+  # Scale on Reference
   if (scaleOnReferenceLabel) {
     if (length(referenceLabel) == 1) {
-      scaleFactor <- rowMeans(normCounts[,referenceCells])
+      ref_c <- intersect(unlist(referenceCells), colnames(normCounts))
+      scaleFactor <- rowMeans(normCounts[, ref_c, drop=FALSE])
     } else {
       scaleFactor <- list()
       for (i in referenceLabel) {
-        scaleFactor[[i]] <- rowMeans(normCounts[,referenceCells[[i]]])
+        ref_c <- intersect(referenceCells[[i]], colnames(normCounts))
+        if(length(ref_c)>0) scaleFactor[[i]] <- rowMeans(normCounts[, ref_c, drop=FALSE])
       }
-      scaleFactor <- do.call(rbind,scaleFactor)
-      scaleFactor <- na.omit(scaleFactor)
-      scaleFactor <- apply(scaleFactor, 2, median)
+      if(length(scaleFactor) > 0) {
+        scaleFactor <- do.call(rbind, scaleFactor)
+        scaleFactor <- na.omit(scaleFactor)
+        scaleFactor <- apply(scaleFactor, 2, median)
+      } else {
+        scaleFactor <- rowMeans(normCounts)
+      }
     }
   } else {
     scaleFactor <- rowMeans(normCounts)
   }
 
-  invisible(gc())
-
   normCounts <- normCounts - scaleFactor
-  invisible(gc())
   normCounts <- funTrim(normCounts, lo = -3, up = 3)
   invisible(gc())
 
-  geneMetadata2 <- geneMetadata2[which(geneMetadata2$hgnc_symbol %in% topExprGenes),]
+  # Genomic Windows
+  geneMetadata2 <- geneMetadata2[which(geneMetadata2$hgnc_symbol %in% rownames(normCounts)),]
   geneMetadata2 <- geneMetadata2[order(geneMetadata2$chromosome_num,geneMetadata2$start_position),]
 
-  # Preparation of genomic windows
   genomicWindows <- lapply(c(1:23), function(chrom) {
     genesC <- geneMetadata2[which(geneMetadata2$chromosome_num == chrom),]
     chr_arms <- unique(genesC$chr_arm)
@@ -210,7 +200,7 @@ Computing the CNV without a reference."))
       iter <- round(windowSize / 2)
       if (N > windowSize) {
         gw <- lapply(seq(iter + 1, N - iter, by = windowStep), function(i) {
-          genesArm[(i - iter):(i + iter), "hgnc_symbol"] |> unlist() |> as.character()
+          as.character(unlist(genesArm[(i - iter):(i + iter), "hgnc_symbol"]))
         })
         names(gw) <- paste0(chrom, ".", arm, 1:length(gw))
       } else {
@@ -221,59 +211,62 @@ Computing the CNV without a reference."))
     }
     return(chrom_windows)
   })
-
   genomicWindows <- unlist(genomicWindows,recursive=F)
-  genomicScores <- sapply(genomicWindows, function(g) {
-    if (length(g) == 1) {
-      normCounts[g, ]
-    } else {
-      colMeans(normCounts[g, ])
-    }
-  })
-  rm(normCounts)
-  invisible(gc())
 
+  # 计算 Genomic Scores
+  genomicScores <- sapply(genomicWindows, function(g) {
+    g_safe <- intersect(g, rownames(normCounts))
+    if (length(g_safe) == 0) return(rep(0, ncol(normCounts)))
+    if (length(g_safe) == 1) normCounts[g_safe, ]
+    else colMeans(normCounts[g_safe, ])
+  })
+  if(nrow(genomicScores) == ncol(normCounts)) genomicScores <- t(genomicScores)
+
+  rm(normCounts); invisible(gc())
+
+  # 截断处理
   if (scaleOnReferenceLabel) {
     if (length(referenceLabel) == 1) {
-      genomicScoresReferenceLabel<- genomicScores[referenceCells,]
+      ref_c <- intersect(unlist(referenceCells), colnames(genomicScores))
+      genomicScoresReferenceLabel <- t(genomicScores[, ref_c, drop=FALSE])
     } else {
       genomicScoresReferenceLabel <- list()
       for (i in referenceLabel){
-        genomicScoresReferenceLabel[[i]] <- genomicScores[referenceCells[[i]],]
+        ref_c <- intersect(referenceCells[[i]], colnames(genomicScores))
+        if(length(ref_c)>0) genomicScoresReferenceLabel[[i]] <- t(genomicScores[, ref_c, drop=FALSE])
       }
       genomicScoresReferenceLabel <- do.call(rbind, genomicScoresReferenceLabel)
     }
-
     Q01Q99 <- apply(genomicScoresReferenceLabel, 2, stats::quantile, "probs"=c(0+thresholdPercentile,1-thresholdPercentile))
-    genomicScoresTrimmed <- apply(genomicScores, 1,function(v)
-    {v[which(v >= Q01Q99[1,] & v <= Q01Q99[2,])] <- 0 ; v })
-
   } else {
-    if (is.null(referenceVar)) {
-      Q01Q99 <- apply(genomicScores,2,stats::quantile,"probs"=c(0+thresholdPercentile,1-thresholdPercentile))
-      genomicScoresTrimmed <- apply(genomicScores,1,function(v)
-      {v[which(v >= Q01Q99[1,] & v <= Q01Q99[2,])] <- 0;v})
-    } else {
-      cellLines <- split(Seurat::Cells(seuratObj), Seurat::FetchData(seuratObj, vars = referenceVar))
+    Q01Q99 <- apply(genomicScores, 1, stats::quantile, "probs"=c(0+thresholdPercentile, 1-thresholdPercentile))
+  }
 
-      high_threshold <- median(unlist(sapply(cellLines, function(z) apply (genomicScores[z, , drop = F], 2, function(v) quantile(v, probs = c(1-thresholdPercentile))))))
-      low_threshold <- median(unlist(sapply(cellLines, function(z) apply (genomicScores[z, , drop = F], 2, function(v) quantile(v, probs = c(0+thresholdPercentile))))))
-      genomicScoresTrimmed <- t(apply(genomicScores, 2, function(z){
-        z[which( z>low_threshold & z<high_threshold)] = 0; z}))
-    }
+  genomicScoresTrimmed <- genomicScores
+  for(i in 1:nrow(genomicScores)) {
+    low <- Q01Q99[1, i]; high <- Q01Q99[2, i]
+    row_vals <- genomicScores[i, ]
+    row_vals[row_vals >= low & row_vals <= high] <- 0
+    genomicScoresTrimmed[i, ] <- row_vals
   }
 
   if (saveGenomicWindows){
     save(genomicWindows, file = paste0("genomicWindows_size",windowSize,"_step",windowStep,".RData"))
   }
 
-  rawGenomicAssay <- Seurat::CreateAssayObject(counts = t(as.matrix(genomicScores)))
+  # --- 【关键修复】输出 v3 Assay ---
+  rawGenomicAssay <- Seurat::CreateAssayObject(counts = genomicScores)
+  if(inherits(rawGenomicAssay, "Assay5")) rawGenomicAssay <- Seurat::ConvertAssay(rawGenomicAssay, convert.to="v3")
   suppressWarnings({seuratObj[["rawGenomicScores"]] <- rawGenomicAssay})
-  genomicAssay <- Seurat::CreateAssayObject(counts = as.matrix(genomicScoresTrimmed))
+
+  genomicAssay <- Seurat::CreateAssayObject(counts = genomicScoresTrimmed)
+  # 强制转为 v3 (同时填充 data slot)
+  if(inherits(genomicAssay, "Assay5")) genomicAssay <- Seurat::ConvertAssay(genomicAssay, convert.to="v3")
+  genomicAssay <- Seurat::SetAssayData(genomicAssay, slot="data", new.data=as.matrix(genomicScoresTrimmed)) # 兼容 v4
+
   suppressWarnings({seuratObj[["genomicScores"]] <- genomicAssay})
   seuratObj[["cnv_fraction"]] <- colMeans(abs(genomicScoresTrimmed) > 0)
 
   invisible(gc())
-
   return (seuratObj)
 }

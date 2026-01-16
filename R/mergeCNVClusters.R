@@ -11,33 +11,75 @@
 #' @return A Seurat Object with updated CNV clusters, where highly correlated clusters have been merged.
 #'
 #' @export
-
 mergeCNVClusters <- function(seuratObj, mergeThreshold = 0.98){
 
-  # Extract CNV matrix based on chromosome arms
-  cnv_matrix <- as.matrix(seuratObj[[which(names(seuratObj@meta.data) == "1.p_CNV") : which(names(seuratObj@meta.data) == "X.q_CNV")]])
-  cnv_matrix <- cnv_matrix[Seurat::Cells(seuratObj),]
+  # --- 1. 稳健的数据提取 (保持之前的修复) ---
+  chrom_arms_standard <- c(
+    paste0(rep(1:22, each=2), c(".p", ".q")),
+    "X.p", "X.q"
+  )
+  cnv_cols <- paste0(chrom_arms_standard, "_CNV")
 
-  # Initialize the cnv_matrix_clusters
-  cnv_matrix_clusters <- matrix(nrow = 0, ncol = ncol(cnv_matrix))
+  # 检查列是否存在
+  available_cols <- intersect(cnv_cols, colnames(seuratObj@meta.data))
 
-  # Get unique clusters, excluding NA
-  unique_clusters <- unique(seuratObj[["cnv_clusters"]][[1]])
-  unique_clusters <- unique_clusters[!is.na(unique_clusters)]
-
-  # Loop through valid clusters only
-  for (cluster in unique_clusters) {
-    cells <- rownames(seuratObj@meta.data)[which(seuratObj[["cnv_clusters"]] == cluster)]
-    cnv_matrix_clusters <- rbind(cnv_matrix_clusters, colMeans(cnv_matrix[cells, , drop = FALSE]))
+  if(length(available_cols) == 0) {
+    warning("mergeCNVClusters: No per-chromosome arm CNV columns found in metadata. Skipping merge.")
+    return(seuratObj)
   }
 
-  rownames(cnv_matrix_clusters) <- unique_clusters
+  # 按列名提取矩阵
+  cnv_matrix <- as.matrix(seuratObj@meta.data[, available_cols, drop=FALSE])
+  rownames(cnv_matrix) <- rownames(seuratObj@meta.data)
+  cnv_matrix <- cnv_matrix[Seurat::Cells(seuratObj), , drop=FALSE]
 
-  cnv_matrix_clusters_clean <- cnv_matrix_clusters[,colSums(cnv_matrix_clusters != 0) > 0 ]
-  corrmat <- cor(t(cnv_matrix_clusters_clean))
+  # --- 2. 计算平均 CNV (修复类型报错的核心) ---
+  if (!"cnv_clusters" %in% colnames(seuratObj@meta.data)) {
+    warning("mergeCNVClusters: 'cnv_clusters' column not found. Skipping.")
+    return(seuratObj)
+  }
+
+  # 【关键修改】使用 $ 获取向量，而不是 [[ ]] 获取数据框
+  clusters_vec <- seuratObj$cnv_clusters
+
+  unique_clusters <- unique(clusters_vec)
+  unique_clusters <- unique_clusters[!is.na(unique_clusters)]
+  unique_clusters <- sort(unique_clusters)
+
+  cnv_matrix_clusters <- matrix(0, nrow = length(unique_clusters), ncol = ncol(cnv_matrix))
+  rownames(cnv_matrix_clusters) <- unique_clusters
+  colnames(cnv_matrix_clusters) <- colnames(cnv_matrix)
+
+  for (i in seq_along(unique_clusters)) {
+    cluster <- unique_clusters[i]
+
+    # 【关键修改】使用向量进行比较 (clusters_vec == cluster)
+    cells <- rownames(seuratObj@meta.data)[which(clusters_vec == cluster)]
+
+    if(length(cells) > 1) {
+      cnv_matrix_clusters[i, ] <- colMeans(cnv_matrix[cells, , drop = FALSE], na.rm = TRUE)
+    } else if(length(cells) == 1) {
+      cnv_matrix_clusters[i, ] <- cnv_matrix[cells, ]
+    }
+  }
+
+  # --- 3. 计算相关性并合并 (保持之前的修复) ---
+  # 移除全为0的列
+  keep_cols <- colSums(abs(cnv_matrix_clusters)) > 0
+
+  if(sum(keep_cols) < 2) {
+    return(seuratObj)
+  }
+
+  cnv_matrix_clusters_clean <- cnv_matrix_clusters[, keep_cols, drop=FALSE]
+
+  # 计算相关性 (处理 NA)
+  corrmat <- cor(t(cnv_matrix_clusters_clean), use = "pairwise.complete.obs")
+  corrmat[is.na(corrmat)] <- 0
 
   cluster_names <- rownames(corrmat)
   n <- nrow(corrmat)
+
   adj <- (corrmat > mergeThreshold) * 1
   groups <- 1:n
 
@@ -51,23 +93,20 @@ mergeCNVClusters <- function(seuratObj, mergeThreshold = 0.98){
     }
   }
 
+  # --- 4. 更新 Cluster ID ---
   merged <- split(cluster_names, groups)
 
   mapping <- unlist(lapply(merged, function(grp) {
-    setNames(rep(paste(grp, collapse = "_"), length(grp)), as.character(grp))
+    new_name <- grp[1]
+    setNames(rep(new_name, length(grp)), grp)
   }))
 
-  names(mapping) <- sub(".*\\.", "", names(mapping))
-
-  orig <- as.character(seuratObj@meta.data[["cnv_clusters"]])
-
+  # 这里也可以用 seuratObj$cnv_clusters，更安全
+  orig <- as.character(seuratObj$cnv_clusters)
   mapped <- mapping[orig]
-
   mapped[is.na(mapped)] <- orig[is.na(mapped)]
-  names(mapped) <- rownames(seuratObj@meta.data)
 
-  seuratObj@meta.data[["cnv_clusters"]] <- sub("_.*", "", mapped)
-  seuratObj@meta.data[["cnv_clusters"]] <- as.numeric(factor(seuratObj@meta.data[["cnv_clusters"]]))
+  seuratObj@meta.data[["cnv_clusters"]] <- as.numeric(as.factor(mapped))
 
   return(seuratObj)
 }

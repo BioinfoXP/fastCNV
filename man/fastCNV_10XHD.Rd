@@ -22,7 +22,7 @@ fastCNV_10XHD(
   genesToForce = NULL,
   regionToForce = NULL,
   getCNVPerChromosomeArm = TRUE,
-  getCNVClusters = FALSE,
+  getCNVClusters = TRUE,
   k_clusters = NULL,
   h_clusters = NULL,
   mergeCNV = TRUE,

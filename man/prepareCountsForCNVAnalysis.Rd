@@ -2,9 +2,7 @@
 % Please edit documentation in R/prepareCountsForCNV.R
 \name{prepareCountsForCNVAnalysis}
 \alias{prepareCountsForCNVAnalysis}
-\title{Aggregate Observations by Cell Type for CNV Analysis
-Aggregates observations with the same cell types to increase counts per observation,
-improving Copy Number Variation (CNV) computation.}
+\title{Aggregate Observations by Cell Type for CNV Analysis}
 \usage{
 prepareCountsForCNVAnalysis(
   seuratObj,
@@ -36,10 +34,28 @@ A Seurat object with:
 \itemize{
 \item A new assay called \strong{"AggregatedCounts"} containing the modified count matrix.
 \item \strong{Seurat clusters} stored in the metadata.
+\item The "AggregatedCounts" assay is forced to Seurat v3 structure to ensure compatibility with downstream CNV tools.
 }
 }
 \description{
-Aggregate Observations by Cell Type for CNV Analysis
 Aggregates observations with the same cell types to increase counts per observation,
-improving Copy Number Variation (CNV) computation.
+improving Copy Number Variation (CNV) computation. This function is compatible with
+both Seurat v4 and v5.
+}
+\examples{
+\dontrun{
+# Load your Seurat object
+my_seurat <- readRDS("sample_data.rds")
+
+# Prepare counts for CNV (aggregating by cell type annotation)
+my_seurat <- prepareCountsForCNVAnalysis(
+  seuratObj = my_seurat,
+  sampleName = "Patient1",
+  referenceVar = "cell_type_annotation",
+  aggregFactor = 15000
+)
+
+# The object now has an "AggregatedCounts" assay ready for CNVAnalysis
+}
+
 }

@@ -43,7 +43,6 @@
 #' )
 #' }
 #'
-#' CNVAnalysis
 #' @export
 CNVAnalysis <- function(object,
                         referenceVar = NULL,
@@ -60,48 +59,25 @@ CNVAnalysis <- function(object,
                         chrArmsToForce = NULL,
                         genesToForce = NULL,
                         regionToForce = NULL) {
-  
+
   message(crayon::yellow(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Running CNV analysis...")))
-  
-  # --- 1. 智能选择 Assay ---
-  pick_assay <- function(obj, user_assay) {
-    if(!is.null(user_assay)) return(user_assay)
-    if("AggregatedCounts" %in% Seurat::Assays(obj)) {
-      message(crayon::cyan("Note: Using 'AggregatedCounts' assay for analysis."))
-      return("AggregatedCounts")
-    }
-    d_assay <- Seurat::DefaultAssay(obj)
-    message(crayon::cyan(paste0("Note: 'AggregatedCounts' not found. Using default assay '", d_assay, "'.")))
-    return(d_assay)
-  }
-  
-  # --- 2. 核心运行函数 ---
+
+  # --- 辅助函数：单样本处理 ---
   run_single <- function(obj) {
-    use_assay <- pick_assay(obj, assay)
-    
-    # --- 【关键修复】更稳健的 Reference 检查 ---
-    if(!is.null(referenceVar) && !is.null(referenceLabel)) {
-      # A. 检查列是否存在
-      if(!referenceVar %in% colnames(obj@meta.data)) {
-        stop(paste0("Error: Metadata column '", referenceVar, "' not found in the Seurat object."))
-      }
-      
-      # B. 安全获取 Metadata 向量 (强制转为 character 避免因子问题)
-      # 直接从 @meta.data 获取，避开 Seurat [[ ]] 访问器的潜在版本差异
-      meta_vals <- as.character(obj@meta.data[[referenceVar]])
-      ref_vals <- as.character(referenceLabel)
-      
-      # C. 检查是否有匹配
-      # 使用 any(...) 检查是否至少有一个细胞匹配
-      if(!any(meta_vals %in% ref_vals)) {
-        # 如果报错，打印出当前列里前5个值，帮助 debug
-        found_vals <- paste(head(unique(meta_vals), 5), collapse = ", ")
-        stop(paste0("Error: No cells found for reference label(s): ", paste(ref_vals, collapse=", "), 
-                    ".\n  > Inside '", referenceVar, "' column, found values include: ", found_vals))
-      }
+    # 1. 确定 Assay
+    use_assay <- assay
+    if(is.null(use_assay)) {
+      if("AggregatedCounts" %in% Seurat::Assays(obj)) use_assay <- "AggregatedCounts"
+      else use_assay <- Seurat::DefaultAssay(obj)
     }
-    # -----------------------------------------------
-    
+
+    # 2. 强制转 v3 Assay (防御性降级)
+    if(inherits(obj[[use_assay]], "Assay5")) {
+      message(crayon::cyan(paste0("Downgrading assay '", use_assay, "' to v3 for compatibility.")))
+      obj[[use_assay]] <- Seurat::ConvertAssay(obj[[use_assay]], convert.to = "v3")
+    }
+
+    # 3. 运行
     CNVCalling(obj,
                assay = use_assay,
                referenceVar = referenceVar,
@@ -112,45 +88,47 @@ CNVAnalysis <- function(object,
                windowSize = windowSize,
                windowStep = windowStep,
                saveGenomicWindows = saveGenomicWindows,
-               topNGenes = topNGenes)
+               topNGenes = topNGenes,
+               chrArmsToForce = chrArmsToForce,
+               genesToForce = genesToForce,
+               regionToForce = regionToForce)
   }
-  
-  # --- 3. 列表/单对象处理流程 ---
+
   if (!is.list(object)) {
+    # 单个对象
     object <- run_single(object)
+    invisible(gc())
   } else {
+    # 列表
     if (length(object) == 1) {
       object <- list(run_single(object[[1]]))
+      invisible(gc())
     } else {
-      if (pooledReference) {
-        # 假设列表所有对象结构一致
-        use_assay <- pick_assay(object[[1]], assay)
-        
-        # 对列表中的每个对象进行简单的 Reference 预检查 (可选)
-        for(i in seq_along(object)) {
-             if(!is.null(referenceVar) && !referenceVar %in% colnames(object[[i]]@meta.data)) {
-                 warning(paste0("Warning: Object ", i, " is missing referenceVar '", referenceVar, "'"))
-             }
-        }
-
+      # 多样本
+      if (pooledReference == TRUE) {
+        # 确保所有对象 Assay 兼容
+        # (这里略去 CNVCallingList 的具体修改，只要 CNVCallingList 内部也用了 GetAssayData 即可，建议单样本场景不用这个路径)
         object <- CNVCallingList(object,
-                                 assay = use_assay,
+                                 assay = assay,
                                  referenceVar = referenceVar,
                                  referenceLabel = referenceLabel,
                                  scaleOnReferenceLabel = scaleOnReferenceLabel,
                                  thresholdPercentile = thresholdPercentile,
-                                 geneMetadata = geneMetadata,
-                                 windowSize = windowSize,
-                                 windowStep = windowStep,
+                                 geneMetadata=geneMetadata,
+                                 windowSize=windowSize,
+                                 windowStep=windowStep,
                                  saveGenomicWindows = saveGenomicWindows,
-                                 topNGenes = topNGenes)
+                                 topNGenes=topNGenes,
+                                 chrArmsToForce = chrArmsToForce,
+                                 genesToForce = genesToForce,
+                                 regionToForce = regionToForce)
+        invisible(gc())
       } else {
         object <- lapply(object, run_single)
+        invisible(gc())
       }
     }
   }
-  
-  invisible(gc())
   message(crayon::green(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Done !")))
-  return(object)
+  return (object)
 }

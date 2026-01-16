@@ -28,8 +28,6 @@
 #'
 #' @export
 #'
-
-
 CNVCallingList <- function(seuratList,
                            assay = NULL,
                            referenceVar = NULL,
@@ -45,14 +43,27 @@ CNVCallingList <- function(seuratList,
                            genesToForce = NULL,
                            regionToForce = NULL
 ){
+
+  # --- 1. 稳健的数据获取 (修复核心报错) ---
   LrawcountsByPatient <- lapply(seuratList, function(x) {
-    if (!is.null(assay)) {
-      as.matrix(Seurat::GetAssay(x, assay = assay)["counts"])
-    } else if ("AggregatedCounts" %in% Seurat::Assays(x)) {
-      as.matrix(Seurat::GetAssay(x, assay = "AggregatedCounts")["counts"])
-    } else {
-      as.matrix(Seurat::GetAssay(x, assay = Seurat::Assays(x)[1])["counts"])
-    } } )
+    # 自动确定 Assay
+    use_assay <- assay
+    if (is.null(use_assay)) {
+      if ("AggregatedCounts" %in% Seurat::Assays(x)) {
+        use_assay <- "AggregatedCounts"
+      } else {
+        use_assay <- Seurat::Assays(x)[1]
+      }
+    }
+
+    # 使用 GetAssayData 获取矩阵 (兼容 v4/v5)
+    mat <- tryCatch({
+      as.matrix(Seurat::GetAssayData(x, assay = use_assay, slot = "counts"))
+    }, error = function(e) {
+      as.matrix(Seurat::GetAssayData(x, assay = use_assay, layer = "counts"))
+    })
+    return(mat)
+  })
 
   invisible(gc())
 
@@ -63,7 +74,6 @@ CNVCallingList <- function(seuratList,
 
   # getting reference items per patient
   if (is.null(referenceVar) || is.null(referenceLabel)){
-    # unable to scale the results on reference data if we don't know what the reference data is
     message(crayon::black("referenceVar and/or referenceLabel parameters not found. Computing the CNV without a reference."))
     scaleOnReferenceLabel = FALSE
   } else if ( as.numeric(sum(sapply(lapply(Lannot, function(annot) rownames(annot)[which(annot == referenceLabel)]), function(x) length(x)))) == 0 ) {
@@ -98,13 +108,23 @@ CNVCallingList <- function(seuratList,
   }
 
   funGenomicScore <- function(normcounts,GW=genomicWindows){
-    res <- sapply(GW, function(g) colMeans(normcounts[g,]))
+    res <- sapply(GW, function(g) {
+      # 确保基因存在于矩阵中
+      g_safe <- intersect(g, rownames(normcounts))
+      if(length(g_safe) == 0) return(rep(0, ncol(normcounts)))
+      if(length(g_safe) == 1) return(normcounts[g_safe, ])
+      colMeans(normcounts[g_safe, ])
+    })
     res
   }
 
   # Analyses
 
   commonGenes <- Reduce(intersect, c(lapply(LrawcountsByPatient, rownames), list(geneMetadata2$hgnc_symbol)))
+
+  # 基因数检查
+  if(length(commonGenes) < 10) stop("Error: Less than 10 common genes found. Check gene annotation types (Symbol vs ID).")
+
   LrawcountsByPatient <- lapply(LrawcountsByPatient, function(x) x[commonGenes,])
   invisible(gc())
   if (exists("LN")){
@@ -163,6 +183,8 @@ CNVCallingList <- function(seuratList,
   }
 
   final_selected_genes <- unlist(genes_by_arm)
+  # 确保唯一且存在
+  final_selected_genes <- intersect(unique(final_selected_genes), commonGenes)
 
   LrawcountsByPatient <- lapply(LrawcountsByPatient, function(x) x[final_selected_genes,])
   invisible(gc())
@@ -254,13 +276,23 @@ CNVCallingList <- function(seuratList,
     save(genomicWindows, file = paste0("genomicWindows_size",windowSize,"_step",windowStep,".RData"))
   }
 
+  # --- 2. 创建兼容 v3 的 Assay (防范下游错误) ---
   for (i in 1:length(seuratList)) {
+    # Raw Scores
     rawGenomicAssay <- Seurat::CreateAssayObject(counts = LgenomicScores[i][[1]])
+    if(inherits(rawGenomicAssay, "Assay5")) rawGenomicAssay <- Seurat::ConvertAssay(rawGenomicAssay, convert.to="v3")
     suppressWarnings({seuratList[[i]][["rawGenomicScores"]] <- rawGenomicAssay})
+
+    # Trimmed Scores (Main Result)
     genomicAssay <- Seurat::CreateAssayObject(counts = LgenomicScoresTrimmed[i][[1]])
+    if(inherits(genomicAssay, "Assay5")) genomicAssay <- Seurat::ConvertAssay(genomicAssay, convert.to="v3")
+    # 填充 data slot，确保兼容 v4
+    genomicAssay <- Seurat::SetAssayData(genomicAssay, slot="data", new.data=as.matrix(LgenomicScoresTrimmed[i][[1]]))
+
     suppressWarnings({seuratList[[i]][["genomicScores"]] <- genomicAssay})
     seuratList[[i]][["cnv_fraction"]] <- colMeans(abs(LgenomicScoresTrimmed[i][[1]]) > 0)
   }
+
   invisible(gc())
   return (seuratList)
 }
