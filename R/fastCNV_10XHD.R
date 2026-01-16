@@ -51,7 +51,6 @@ fastCNV_10XHD <- function(seuratObjHD,
                           referenceVar = NULL,
                           referenceLabel = NULL,
                           assay = "Spatial.016um",
-
                           pooledReference = TRUE,
                           scaleOnReferenceLabel = TRUE,
                           thresholdPercentile = 0.01,
@@ -63,16 +62,12 @@ fastCNV_10XHD <- function(seuratObjHD,
                           chrArmsToForce = NULL,
                           genesToForce = NULL,
                           regionToForce = NULL,
-
                           getCNVPerChromosomeArm = TRUE,
-
                           getCNVClusters = TRUE,
                           k_clusters = NULL,
                           h_clusters = NULL,
-
                           mergeCNV = TRUE,
                           mergeThreshold = 0.98,
-
                           doPlot = TRUE,
                           denoise = TRUE,
                           printPlot = FALSE,
@@ -85,29 +80,34 @@ fastCNV_10XHD <- function(seuratObjHD,
                           raster_by_magick = requireNamespace("magick", quietly = TRUE)){
 
   if(!length(seuratObjHD)==length(sampleName)) stop(crayon::red("seuratObjHD & sampleName should have the same length"))
-
   options(future.globals.maxSize = 8000*1024^2)
 
+  # 1. 准备 HD 对象 (列表化)
   message(crayon::yellow(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Preparing HD object...")))
-  if (length(seuratObjHD) == 1) {
-    Seurat::DefaultAssay(seuratObjHD) <- assay
-    assaysCells <- Seurat::Cells(seuratObjHD)
-    newHDobj <- suppressWarnings(suppressMessages(subset(seuratObjHD, cells = assaysCells)))
-    newHDobj@project.name = sampleName
-  } else if (length(seuratObjHD) > 1) {
-    newHDobj <- list()
-    for (i in 1:length(seuratObjHD)) {
-      Seurat::DefaultAssay(seuratObjHD[[i]]) <- assay
-      assaysCells <- Seurat::Cells(seuratObjHD[[i]])
-      newHDobj[[i]] <- suppressWarnings(suppressMessages(subset(seuratObjHD[[i]], cells = assaysCells)))
-      newHDobj[[i]]@project.name = sampleName[i]
-    }
+
+  if (!is.list(seuratObjHD) || inherits(seuratObjHD, "Seurat")) {
+    seuratObjHD <- list(seuratObjHD)
   }
+
+  newHDobj <- list()
+  for (i in 1:length(seuratObjHD)) {
+    Seurat::DefaultAssay(seuratObjHD[[i]]) <- assay
+    # 确保 Cells 匹配
+    assaysCells <- Seurat::Cells(seuratObjHD[[i]])
+    newHDobj[[i]] <- suppressWarnings(suppressMessages(subset(seuratObjHD[[i]], cells = assaysCells)))
+    newHDobj[[i]]@project.name = sampleName[i]
+    seuratObjHD[[i]]@project.name = sampleName[i]
+  }
+
   message(crayon::green(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Done !")))
   invisible(gc())
 
-  ## Do CNV Analysis on the seurat / list of seurat Visium HD Objects
-  newHDobj <- CNVAnalysis(object = newHDobj,
+  # 2. 运行 CNV 分析
+  # 如果是单样本，CNVAnalysis 返回 Seurat 对象；多样本返回 List
+  # 我们需要统一处理
+  input_for_analysis <- if(length(newHDobj) == 1) newHDobj[[1]] else newHDobj
+
+  newHDobj <- CNVAnalysis(object = input_for_analysis,
                           referenceVar = referenceVar,
                           referenceLabel = referenceLabel,
                           assay = assay,
@@ -124,36 +124,54 @@ fastCNV_10XHD <- function(seuratObjHD,
                           regionToForce = regionToForce)
   invisible(gc())
 
-  seuratObjHD[["genomicScores"]] = Seurat::GetAssay(newHDobj, assay = "genomicScores")
-  seuratObjHD$cnv_fraction = NA
-  seuratObjHD$cnv_fraction[rownames(newHDobj@meta.data)] = newHDobj$cnv_fraction
-  Seurat::DefaultAssay(seuratObjHD) = assay
-  seuratObjHD@project.name = sampleName
-  rm(newHDobj) ; invisible(gc())
+  # 3. 将结果写回 seuratObjHD (修复 List 赋值逻辑)
+  # 统一转回 list 方便循环
+  if (!is.list(newHDobj) || inherits(newHDobj, "Seurat")) {
+    newHDobj <- list(newHDobj)
+  }
 
+  for(i in 1:length(seuratObjHD)) {
+    seuratObjHD[[i]][["genomicScores"]] <- Seurat::GetAssay(newHDobj[[i]], assay = "genomicScores")
+    seuratObjHD[[i]]$cnv_fraction <- NA
+    # 安全赋值 metadata
+    common_cells <- intersect(rownames(seuratObjHD[[i]]@meta.data), rownames(newHDobj[[i]]@meta.data))
+    seuratObjHD[[i]]$cnv_fraction[common_cells] <- newHDobj[[i]]$cnv_fraction[common_cells]
+    Seurat::DefaultAssay(seuratObjHD[[i]]) <- assay
+  }
+
+  rm(newHDobj); invisible(gc())
+
+  # 4. 后续计算 (Chromosome Arm, Clustering, Plotting)
+  # 同样需要对 List 循环处理
+
+  # Chromosome Arm
   if (getCNVPerChromosomeArm == TRUE){
     message(crayon::yellow(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Computing CNV per chromosome arm...")))
-    seuratObjHD <- CNVPerChromosomeArm(seuratObjHD)
+    for(i in 1:length(seuratObjHD)) {
+      seuratObjHD[[i]] <- CNVPerChromosomeArm(seuratObjHD[[i]])
+    }
     invisible(gc())
     message(crayon::green(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Done!")))
   }
 
+  # Clustering
   if (getCNVClusters == TRUE){
     message(crayon::yellow(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Running CNV clustering...")))
-    Seurat::DefaultAssay(seuratObjHD) = assay
-    seuratObjHD <- CNVCluster(seuratObj = seuratObjHD,
-                           k = k_clusters,
-                           h = h_clusters)
-    invisible(gc())
-    if (mergeCNV == TRUE) {
-      seuratObjHD <- mergeCNVClusters(seuratObj = seuratObjHD, mergeThreshold = mergeThreshold)
+    for(i in 1:length(seuratObjHD)) {
+      Seurat::DefaultAssay(seuratObjHD[[i]]) <- assay
+      seuratObjHD[[i]] <- CNVCluster(seuratObj = seuratObjHD[[i]], k = k_clusters, h = h_clusters)
+      if (mergeCNV == TRUE) {
+        seuratObjHD[[i]] <- mergeCNVClusters(seuratObj = seuratObjHD[[i]], mergeThreshold = mergeThreshold)
+      }
     }
+    invisible(gc())
     message(crayon::green(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Done!")))
   }
 
-  if (length(seuratObjHD) == 1) {
-    if (doPlot == TRUE) {
-      plotCNVResultsHD(seuratObjHD = seuratObjHD,
+  # Plotting
+  if (doPlot == TRUE) {
+    for (i in 1:length(seuratObjHD)) {
+      plotCNVResultsHD(seuratObjHD = seuratObjHD[[i]],
                        denoise = denoise,
                        printPlot = printPlot,
                        savePath = savePath,
@@ -166,25 +184,9 @@ fastCNV_10XHD <- function(seuratObjHD,
                        raster_by_magick = raster_by_magick)
       invisible(gc())
     }
-
-  } else if (length(seuratObjHD) > 1) {
-    if (doPlot == TRUE) {
-      for (i in 1:length(seuratObjHD)) {
-        plotCNVResultsHD(seuratObjHD = seuratObjHD[[i]],
-                         denoise = denoise,
-                         printPlot = printPlot,
-                         savePath = savePath,
-                         outputType = outputType,
-                         referenceVar = referenceVar,
-                         clustersVar = clustersVar,
-                         clusters_palette = clusters_palette,
-                         splitPlotOnVar = splitPlotOnVar,
-                         referencePalette = referencePalette,
-                         raster_by_magick = raster_by_magick)
-        invisible(gc())
-      }
-    }
   }
 
+  # 返回
+  if(length(seuratObjHD) == 1) return(seuratObjHD[[1]])
   return(seuratObjHD)
 }

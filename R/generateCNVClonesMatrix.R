@@ -16,46 +16,78 @@
 #' the chromosome arms, with values corresponding to CNV scores or CNV calls.
 #'
 #' @export
+generateCNVClonesMatrix <- function(seuratObj, healthyClusters = NULL, values = "scores", cnv_thresh = 0.15) {
 
-generateCNVClonesMatrix <- function(seuratObj,  healthyClusters = NULL, values = "scores", cnv_thresh = 0.15) {
-  # Extract CNV matrix based on chromosome arms
-  cnv_matrix <- as.matrix(seuratObj[[which(names(seuratObj@meta.data) == "1.p_CNV") : which(names(seuratObj@meta.data) == "X.q_CNV")]])
-  cnv_matrix <- cnv_matrix[Seurat::Cells(seuratObj),]
+  # --- 1. 稳健的数据提取 (修复核心报错) ---
+  chrom_arms_standard <- c(
+    paste0(rep(1:22, each=2), c(".p", ".q")),
+    "X.p", "X.q"
+  )
+  cnv_cols <- paste0(chrom_arms_standard, "_CNV")
 
-  # Initialize the cnv_matrix_clusters
-  cnv_matrix_clusters <- matrix(nrow = 0, ncol = ncol(cnv_matrix))
+  # 检查列是否存在
+  available_cols <- intersect(cnv_cols, colnames(seuratObj@meta.data))
 
-  # Get unique clusters, excluding NA
-  unique_clusters <- unique(seuratObj[["cnv_clusters"]][[1]])
-  unique_clusters <- unique_clusters[!is.na(unique_clusters)]
-
-  # Loop through valid clusters only
-  for (cluster in unique_clusters) {
-    cells <- rownames(seuratObj@meta.data)[which(seuratObj[["cnv_clusters"]] == cluster)]
-    cnv_matrix_clusters <- rbind(cnv_matrix_clusters, colMeans(cnv_matrix[cells, , drop = FALSE]))
+  if(length(available_cols) == 0) {
+    stop("generateCNVClonesMatrix: No per-chromosome arm CNV columns found in metadata. Please run CNVPerChromosomeArm() first.")
   }
 
-  rownames(cnv_matrix_clusters) <- unique_clusters
+  # 按列名提取矩阵 (避免位置索引导致的错位)
+  cnv_matrix <- as.matrix(seuratObj@meta.data[, available_cols, drop=FALSE])
+  rownames(cnv_matrix) <- rownames(seuratObj@meta.data)
+  cnv_matrix <- cnv_matrix[Seurat::Cells(seuratObj), , drop=FALSE]
 
-  # Label clusters as "Clone X" or "Benign X"
-  rownames(cnv_matrix_clusters) <- paste0("Clone ", rownames(cnv_matrix_clusters))
-  if (!is.null(healthyClusters)) {
-    for (hc in healthyClusters) {
-      rownames(cnv_matrix_clusters)[rownames(cnv_matrix_clusters) == paste0("Clone ", as.character(hc))] <- paste0("Benign ", hc)
+  # --- 2. 计算 Cluster 均值 ---
+  if(!"cnv_clusters" %in% colnames(seuratObj@meta.data)) {
+    stop("generateCNVClonesMatrix: 'cnv_clusters' column not found in metadata.")
+  }
+
+  # 使用 $ 获取向量，避免数据框类型报错
+  clusters_vec <- seuratObj$cnv_clusters
+  unique_clusters <- sort(unique(clusters_vec[!is.na(clusters_vec)]))
+
+  # 初始化结果矩阵
+  cnv_matrix_clusters <- matrix(0, nrow = length(unique_clusters), ncol = ncol(cnv_matrix))
+  rownames(cnv_matrix_clusters) <- unique_clusters
+  colnames(cnv_matrix_clusters) <- colnames(cnv_matrix)
+
+  for (i in seq_along(unique_clusters)) {
+    cluster <- unique_clusters[i]
+    # 使用向量比较
+    cells <- rownames(seuratObj@meta.data)[which(clusters_vec == cluster)]
+
+    if(length(cells) > 1) {
+      cnv_matrix_clusters[i, ] <- colMeans(cnv_matrix[cells, , drop = FALSE], na.rm = TRUE)
+    } else if(length(cells) == 1) {
+      cnv_matrix_clusters[i, ] <- cnv_matrix[cells, ]
     }
   }
 
+  # --- 3. 标签重命名 ---
+  new_rownames <- paste0("Clone ", rownames(cnv_matrix_clusters))
+
+  if (!is.null(healthyClusters)) {
+    for (hc in healthyClusters) {
+      # 确保匹配正确 (转换为字符比较)
+      idx <- which(rownames(cnv_matrix_clusters) == as.character(hc))
+      if(length(idx) > 0) {
+        new_rownames[idx] <- paste0("Benign ", hc)
+      }
+    }
+  }
+  rownames(cnv_matrix_clusters) <- new_rownames
+
+  # --- 4. 返回结果 ---
   if(values == "scores") {
-    # Return the CNV matrix
     return(cnv_matrix_clusters)
   } else if (values == "calls") {
     alt_matrix <- matrix(0, nrow = nrow(cnv_matrix_clusters), ncol = ncol(cnv_matrix_clusters),
                          dimnames = dimnames(cnv_matrix_clusters))
+    # 向量化赋值
     alt_matrix[cnv_matrix_clusters >= cnv_thresh] <- 1
     alt_matrix[cnv_matrix_clusters <= -cnv_thresh] <- -1
     return(alt_matrix)
   } else {
     stop("Non supported `values` value. Must be one of: 'scores', 'calls'")
   }
-
 }

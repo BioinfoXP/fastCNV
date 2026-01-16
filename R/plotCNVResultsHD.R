@@ -30,8 +30,6 @@
 #' @return This function generates a heatmap and saves it as a `.pdf` or `.png` file in the specified path (default = working directory).
 #'
 #' @export
-
-
 plotCNVResultsHD <- function(seuratObjHD,
                              referenceVar = NULL,
                              clustersVar = "cnv_clusters",
@@ -43,7 +41,9 @@ plotCNVResultsHD <- function(seuratObjHD,
                              clusters_palette = "default",
                              outputType = "png",
                              raster_by_magick = requireNamespace("magick", quietly = TRUE)){
+
   message(crayon::yellow(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Plotting CNV heatmap...")))
+
   if (outputType != "png" && outputType != "pdf"){
     message("Warning : outputType not valid, should be 'pdf' or 'png'. Setting outputType to 'png'")
     outputType = "png"
@@ -62,49 +62,43 @@ plotCNVResultsHD <- function(seuratObjHD,
     }
   }
 
-  if (denoise == TRUE) {
-    mat <- as.matrix(Seurat::GetAssay(seuratObjHD, "genomicScores")["data"])
-    # Make chromosomes with few genomic windows appear bigger
-    arms <- rownames(mat)
-    arms_group <- stringr::str_extract(arms, "^[0-9XY]+\\.[pq]")
-    unique_arms <- unique(arms_group)
-    M <- do.call(rbind, lapply(unique_arms, function(arm) {
-      idx <- which(arms_group == arm)
-      rows <- mat[idx, , drop = FALSE]
+  # --- 1. 稳健的数据获取 (核心修复) ---
+  # 确定 Assay 名称
+  target_assay <- if(denoise) "genomicScores" else "rawGenomicScores"
 
-      if (nrow(rows) < 3) {
-        need <- 3 - nrow(rows)
-        dup_rows <- rows[rep(1:nrow(rows), length.out = need), , drop = FALSE]
+  # 尝试获取数据矩阵
+  mat <- tryCatch({
+    as.matrix(Seurat::GetAssayData(seuratObjHD, assay = target_assay, slot = "data"))
+  }, error = function(e) {
+    tryCatch({
+      as.matrix(Seurat::GetAssayData(seuratObjHD, assay = target_assay, layer = "data"))
+    }, error = function(e2) {
+      # 如果没有 data，尝试 counts (兼容 rawGenomicScores 可能只有 counts 的情况)
+      as.matrix(Seurat::GetAssayData(seuratObjHD, assay = target_assay, slot = "counts"))
+    })
+  })
 
-        rownames(dup_rows) <- paste0(rownames(rows)[rep(1:nrow(rows), length.out = need)], "_dup")
+  # --- 2. 矩阵处理 ---
+  # Make chromosomes with few genomic windows appear bigger
+  arms <- rownames(mat)
+  arms_group <- stringr::str_extract(arms, "^[0-9XY]+\\.[pq]")
+  unique_arms <- unique(arms_group)
 
-        rows <- rbind(rows, dup_rows)
-      }
-      rows
-    }))
-    M <- t(M)
-    } else {
-      mat <- as.matrix(Seurat::GetAssay(seuratObjHD, "rawGenomicScores")["data"])
-      # Make chromosomes with few genomic windows appear bigger
-      arms <- rownames(mat)
-      arms_group <- stringr::str_extract(arms, "^[0-9XY]+\\.[pq]")
-      unique_arms <- unique(arms_group)
-      M <- do.call(rbind, lapply(unique_arms, function(arm) {
-        idx <- which(arms_group == arm)
-        rows <- mat[idx, , drop = FALSE]
+  M <- do.call(rbind, lapply(unique_arms, function(arm) {
+    idx <- which(arms_group == arm)
+    rows <- mat[idx, , drop = FALSE]
 
-        if (nrow(rows) < 3) {
-          need <- 3 - nrow(rows)
-          dup_rows <- rows[rep(1:nrow(rows), length.out = need), , drop = FALSE]
+    if (nrow(rows) < 3) {
+      need <- 3 - nrow(rows)
+      dup_rows <- rows[rep(1:nrow(rows), length.out = need), , drop = FALSE]
+      rownames(dup_rows) <- paste0(rownames(rows)[rep(1:nrow(rows), length.out = need)], "_dup")
+      rows <- rbind(rows, dup_rows)
+    }
+    rows
+  }))
+  M <- t(M)
 
-          rownames(dup_rows) <- paste0(rownames(rows)[rep(1:nrow(rows), length.out = need)], "_dup")
-
-          rows <- rbind(rows, dup_rows)
-        }
-        rows
-      }))
-      M <- t(M)
-      }
+  # --- 3. 绘图参数 ---
   if (any(referencePalette == "default")) {
     referencePalette = as.character(paletteer::paletteer_d("pals::glasbey"))
   }
@@ -130,18 +124,17 @@ plotCNVResultsHD <- function(seuratObjHD,
     clusters_colors <- setNames(clusters_palette, sort(unique(clusters_df$Clusters)))
   }
 
+  # 构建注释
+  annotation_heatmap <- NULL
+
   if (!is.null(referenceVar) && is.null(clustersVar)) {
     annotation_heatmap <- ComplexHeatmap::rowAnnotation(
       Annotations = annotation_df$Annotations,
       col = list(Annotations = annot_colors),
       annotation_legend_param = list(
-        title = "Annotations",
-        title_gp = grid::gpar(fontsize = 11),
-        labels_gp = grid::gpar(fontsize = 8),
-        legend_height = grid::unit(3, "cm"),
-        legend_width = grid::unit(1.5, "cm"),
-        grid_height = grid::unit(0.6, "cm"),
-        grid_width = grid::unit(0.6, "cm")
+        title = "Annotations", title_gp = grid::gpar(fontsize = 11), labels_gp = grid::gpar(fontsize = 8),
+        legend_height = grid::unit(3, "cm"), legend_width = grid::unit(1.5, "cm"),
+        grid_height = grid::unit(0.6, "cm"), grid_width = grid::unit(0.6, "cm")
       )
     )
   }
@@ -151,49 +144,38 @@ plotCNVResultsHD <- function(seuratObjHD,
       Clusters = clusters_df$Clusters,
       col = clusters_colors,
       annotation_legend_param = list(
-        title = "Clusters",
-        title_gp = grid::gpar(fontsize = 11),
-        labels_gp = grid::gpar(fontsize = 8),
-        legend_height = grid::unit(3, "cm"),
-        legend_width = grid::unit(1.5, "cm"),
-        grid_height = grid::unit(0.6, "cm"),
-        grid_width = grid::unit(0.6, "cm")
+        title = "Clusters", title_gp = grid::gpar(fontsize = 11), labels_gp = grid::gpar(fontsize = 8),
+        legend_height = grid::unit(3, "cm"), legend_width = grid::unit(1.5, "cm"),
+        grid_height = grid::unit(0.6, "cm"), grid_width = grid::unit(0.6, "cm")
       )
     )
-  }
-
-  if (is.null(referenceVar) && is.null(clustersVar)) {
-    annotation_heatmap <- NULL
+    if (!is.null(splitPlotOnVar)) {
+      split_df <- as.data.frame(Seurat::FetchData(seuratObjHD, vars = splitPlotOnVar))
+      colnames(split_df) <- "Split"
+    } else {
+      split_df <- NULL
+    }
   }
 
   if (!is.null(referenceVar) && !is.null(clustersVar)) {
     annotation_heatmap <- ComplexHeatmap::rowAnnotation(
       Annotations = annotation_df$Annotations,
       Clusters = clusters_df$Clusters,
-      col = list(
-        Annotations = annot_colors,
-        Clusters = clusters_colors
-      ),
+      col = list(Annotations = annot_colors, Clusters = clusters_colors),
       annotation_legend_param = list(
-        Annotations = list(
-          title = "Annotations",
-          title_gp = grid::gpar(fontsize = 11),
-          labels_gp = grid::gpar(fontsize = 8)
-        ),
-        Clusters = list(
-          title = "CNV cluster",
-          title_gp = grid::gpar(fontsize = 11),
-          labels_gp = grid::gpar(fontsize = 8)
-        )
+        Annotations = list(title = "Annotations", title_gp = grid::gpar(fontsize = 11), labels_gp = grid::gpar(fontsize = 8)),
+        Clusters = list(title = "CNV cluster", title_gp = grid::gpar(fontsize = 11), labels_gp = grid::gpar(fontsize = 8))
       )
     )
   }
+
   if (is.null(split_df)) {
     splitting = NULL
   } else {
     splitting <- as.factor(split_df[[1]])
   }
 
+  # --- 4. 绘制热图 ---
   hm <-  ComplexHeatmap::Heatmap(
     M,
     right_annotation = annotation_heatmap,
@@ -215,11 +197,8 @@ plotCNVResultsHD <- function(seuratObjHD,
     row_title = NULL,
     col = circlize::colorRamp2(c(min(M)/1.5, min(M)/2, min(M)/3, 0, max(M)/3, max(M)/2, max(M)/1.5), c("#0B2F7EFF", "#2A4D9EFF", "#A0A0FFFF", "white", "#E3807D", "#A4161A","#7A0A0D")),
     heatmap_legend_param = list(
-      title = "CNV Score",
-      title_gp = grid::gpar(fontsize = 11),
-      labels_gp = grid::gpar(fontsize = 8),
-      grid_height = grid::unit(1, "cm"),
-      grid_width = grid::unit(0.6, "cm"))
+      title = "CNV Score", title_gp = grid::gpar(fontsize = 11), labels_gp = grid::gpar(fontsize = 8),
+      grid_height = grid::unit(1, "cm"), grid_width = grid::unit(0.6, "cm"))
   )
 
   if(printPlot == TRUE) {
@@ -257,7 +236,4 @@ plotCNVResultsHD <- function(seuratObjHD,
     message(crayon::black,"CNV plot for sample ",seuratObjHD@project.name, " saved at ", fname)
   }
   message(crayon::green(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Done !")))
-
-  #return(hm)
-
 }
