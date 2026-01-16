@@ -43,6 +43,7 @@
 #' )
 #' }
 #'
+#' CNVAnalysis
 #' @export
 CNVAnalysis <- function(object,
                         referenceVar = NULL,
@@ -59,87 +60,96 @@ CNVAnalysis <- function(object,
                         chrArmsToForce = NULL,
                         genesToForce = NULL,
                         regionToForce = NULL) {
-
+  
   message(crayon::yellow(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Running CNV analysis...")))
-
-  # --- 1. 智能选择 Assay 的辅助函数 ---
+  
+  # --- 1. 智能选择 Assay ---
   pick_assay <- function(obj, user_assay) {
-      # 如果用户手动指定了，直接使用
-      if(!is.null(user_assay)) return(user_assay)
-
-      # 自动检测：如果存在聚合后的 Assay，优先使用
-      if("AggregatedCounts" %in% Seurat::Assays(obj)) {
-          message(crayon::cyan("Note: Using 'AggregatedCounts' assay for analysis."))
-          return("AggregatedCounts")
-      }
-
-      # 否则使用默认
-      d_assay <- Seurat::DefaultAssay(obj)
-      message(crayon::cyan(paste0("Note: 'AggregatedCounts' not found. Using default assay '", d_assay, "'.")))
-      return(d_assay)
+    if(!is.null(user_assay)) return(user_assay)
+    if("AggregatedCounts" %in% Seurat::Assays(obj)) {
+      message(crayon::cyan("Note: Using 'AggregatedCounts' assay for analysis."))
+      return("AggregatedCounts")
+    }
+    d_assay <- Seurat::DefaultAssay(obj)
+    message(crayon::cyan(paste0("Note: 'AggregatedCounts' not found. Using default assay '", d_assay, "'.")))
+    return(d_assay)
   }
-
-  # --- 2. 单样本运行包装器 ---
+  
+  # --- 2. 核心运行函数 ---
   run_single <- function(obj) {
-      use_assay <- pick_assay(obj, assay)
-
-      # 安全检查：确保 Reference Label 在该样本中存在
-      # 避免传入错误的 Label 导致后续矩阵切片越界
-      if(!is.null(referenceVar) && !is.null(referenceLabel)) {
-          if(!referenceVar %in% colnames(obj@meta.data)) {
-               stop(paste0("Error: referenceVar '", referenceVar, "' not found in metadata."))
-          }
-          if(sum(obj[[referenceVar]] %in% referenceLabel) == 0) {
-               stop(paste0("Error: No cells found for reference label(s): ", paste(referenceLabel, collapse=", "), "."))
-          }
+    use_assay <- pick_assay(obj, assay)
+    
+    # --- 【关键修复】更稳健的 Reference 检查 ---
+    if(!is.null(referenceVar) && !is.null(referenceLabel)) {
+      # A. 检查列是否存在
+      if(!referenceVar %in% colnames(obj@meta.data)) {
+        stop(paste0("Error: Metadata column '", referenceVar, "' not found in the Seurat object."))
       }
-
-      # 调用核心计算函数
-      CNVCalling(obj,
-                 assay = use_assay,
-                 referenceVar = referenceVar,
-                 referenceLabel = referenceLabel,
-                 scaleOnReferenceLabel = scaleOnReferenceLabel,
-                 thresholdPercentile = thresholdPercentile,
-                 geneMetadata = geneMetadata,
-                 windowSize = windowSize,
-                 windowStep = windowStep,
-                 saveGenomicWindows = saveGenomicWindows,
-                 topNGenes = topNGenes)
+      
+      # B. 安全获取 Metadata 向量 (强制转为 character 避免因子问题)
+      # 直接从 @meta.data 获取，避开 Seurat [[ ]] 访问器的潜在版本差异
+      meta_vals <- as.character(obj@meta.data[[referenceVar]])
+      ref_vals <- as.character(referenceLabel)
+      
+      # C. 检查是否有匹配
+      # 使用 any(...) 检查是否至少有一个细胞匹配
+      if(!any(meta_vals %in% ref_vals)) {
+        # 如果报错，打印出当前列里前5个值，帮助 debug
+        found_vals <- paste(head(unique(meta_vals), 5), collapse = ", ")
+        stop(paste0("Error: No cells found for reference label(s): ", paste(ref_vals, collapse=", "), 
+                    ".\n  > Inside '", referenceVar, "' column, found values include: ", found_vals))
+      }
+    }
+    # -----------------------------------------------
+    
+    CNVCalling(obj,
+               assay = use_assay,
+               referenceVar = referenceVar,
+               referenceLabel = referenceLabel,
+               scaleOnReferenceLabel = scaleOnReferenceLabel,
+               thresholdPercentile = thresholdPercentile,
+               geneMetadata = geneMetadata,
+               windowSize = windowSize,
+               windowStep = windowStep,
+               saveGenomicWindows = saveGenomicWindows,
+               topNGenes = topNGenes)
   }
-
-  # --- 3. 主流程控制 (支持 Single Object 或 List) ---
+  
+  # --- 3. 列表/单对象处理流程 ---
   if (!is.list(object)) {
-      # 单个对象
-      object <- run_single(object)
+    object <- run_single(object)
   } else {
-      # 列表对象
-      if (length(object) == 1) {
-          object <- list(run_single(object[[1]]))
+    if (length(object) == 1) {
+      object <- list(run_single(object[[1]]))
+    } else {
+      if (pooledReference) {
+        # 假设列表所有对象结构一致
+        use_assay <- pick_assay(object[[1]], assay)
+        
+        # 对列表中的每个对象进行简单的 Reference 预检查 (可选)
+        for(i in seq_along(object)) {
+             if(!is.null(referenceVar) && !referenceVar %in% colnames(object[[i]]@meta.data)) {
+                 warning(paste0("Warning: Object ", i, " is missing referenceVar '", referenceVar, "'"))
+             }
+        }
+
+        object <- CNVCallingList(object,
+                                 assay = use_assay,
+                                 referenceVar = referenceVar,
+                                 referenceLabel = referenceLabel,
+                                 scaleOnReferenceLabel = scaleOnReferenceLabel,
+                                 thresholdPercentile = thresholdPercentile,
+                                 geneMetadata = geneMetadata,
+                                 windowSize = windowSize,
+                                 windowStep = windowStep,
+                                 saveGenomicWindows = saveGenomicWindows,
+                                 topNGenes = topNGenes)
       } else {
-          if (pooledReference) {
-             # 如果是 Pooled Reference，通常 CNVCallingList 会处理跨样本合并
-             # 我们假设所有样本结构一致，使用第一个样本来检测 Assay 名称
-             use_assay <- pick_assay(object[[1]], assay)
-
-             object <- CNVCallingList(object,
-                                      assay = use_assay,
-                                      referenceVar = referenceVar,
-                                      referenceLabel = referenceLabel,
-                                      scaleOnReferenceLabel = scaleOnReferenceLabel,
-                                      thresholdPercentile = thresholdPercentile,
-                                      geneMetadata = geneMetadata,
-                                      windowSize = windowSize,
-                                      windowStep = windowStep,
-                                      saveGenomicWindows = saveGenomicWindows,
-                                      topNGenes = topNGenes)
-          } else {
-             # 逐个独立运行
-             object <- lapply(object, run_single)
-          }
+        object <- lapply(object, run_single)
       }
+    }
   }
-
+  
   invisible(gc())
   message(crayon::green(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Done !")))
   return(object)
