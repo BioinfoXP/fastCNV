@@ -1,0 +1,192 @@
+---
+title: "Introduction to fastCNV - Visium HD data" 
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+vignette: >
+  %\VignetteIndexEntry{Introduction to fastCNV - Visium HD data}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+## Context 
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE, message = FALSE, warning = FALSE,
+  comment = "#>"
+)
+```
+
+`fastCNV` is a package to detect the putative Copy Number Variations (CNVs) in single cell (scRNAseq) data or Spatial Transcriptomics (ST) data. It also plots the computed CNVs.
+
+In this vignette you will learn how to run this package on Visium HD seurat object. fastCNV runs on **Seurat5**. 
+
+**Warning** : Visium HD samples are very RAM demanding and the session may crash if not enough RAM is available. We recommend running this vignette in a server. 
+
+## Load packages
+
+To get the example data used in this vignette, you'll need to install and load the `fastCNVdata` package. 
+```{r install, eval=FALSE}
+remotes::install_github("must-bioinfo/fastCNV")
+remotes::install_github("must-bioinfo/fastCNVdata")
+```
+
+
+```{r load}
+library(fastCNV)
+library(fastCNVdata)
+library(Seurat)
+```
+
+## Load the data
+
+Load your Visium HD data with Seurat.
+
+``` {r imports}
+HDBreast <- load_HDBreast()
+```
+
+## Check annotation
+
+You can load a separate annotation file for your dataset. It's usefull to have annotated spots for the analysis. 
+
+```{r annots, eval=FALSE}
+# Import the annotation file corresponding to your sample. For 10X ST data you can annotate your spots with LoupeBrowser. The example data already has the annotations in it. 
+annotation_file <- read.csv("/path/to/your/annotations/for/VisiumHD.csv")
+
+HDBreast[["annots_8um"]] <- annotation_file$Annotations
+```
+
+You can take a look at which annotations are present in your objects, in order to select the labels of the cells that will be used as reference. 
+
+```{r see_annots}
+unique(HDBreast[["annots_8um"]])
+```
+
+fastCNV will use by default the 16µm assay, so if your annotations are done on the 8µm resolution you will need to run this function before running fastCNV on the 16µm assay.
+This function maps the annotations from the 8µm resolution to the 16µm resolution. 
+
+```{r annotations_8_to_16}
+HDBreast <- annotations8umTo16um(HDBreast, referenceVar = "annots_8um") 
+```
+
+Now the 16um spots also have the annotations given to the 8um spots. The projected annotations are in the meta data "projected_annots_8um". This will be the referenceVar we will use from now on. 
+
+You can check if the projected annotations are correct by doing 
+```{r spatialdimplot_annotations, fig.width=8, fig.height=6}
+SpatialDimPlot(HDBreast, group.by = "projected_annots_8um")
+```
+
+## Run fastCNV 
+
+During this step, fastCNV_10XHD() will use: 
+
+- `CNVAnalysis` : computes the CNV. If you have annotations for your Seurat object, you can add the parameters `referenceVar` and `referenceLabel`. 
+
+- `CNVPerChromosome` : to compute the CNV per chromosome arm, and store it in the metadata of the Seurat object. This part of `fastCNV()` can be skipped by turning `getCNVPerChromosome` to `FALSE`.    
+
+- `CNVCluster` : OPTIONAL - performs hierarchical clustering on a genomic score matrix extracted from a Seurat object. This may crash with large Visium HD samples. This function can be run later on.
+
+- `plotCNVResultsHD` : to visualize the results (stored in the assays slot of the Seurat object).
+This function will also build a PNG or PDF file for each sample containing their corresponding CNV heatmap in the current working directory, which can be changed using the `savePath` parameter.
+
+
+We are going to run `fastCNV()` on our Visium HD object. The reference should be the non-tumor spots, here "NoTumor". 
+**Warning** : This can be very RAM demanding. 
+
+```{r run1, fig.width = 8, fig.height=6}
+HDBreast <- fastCNV_10XHD(HDBreast, sampleName = "HDBreast", referenceVar = "projected_annots_8um", referenceLabel = "NoTumor", printPlot = TRUE)
+```
+
+
+## CNV fraction
+
+fastCNV also computes a `cnv_fraction` for each observation in the Seurat object. This can be directly plotted using Seurat spatial plotting functions, as we'll demonstrate on STColon1:
+
+```{r plot_cnv_fraction, fig.width=8, fig.height=3.2}
+library(patchwork)
+SpatialFeaturePlot(HDBreast, "cnv_fraction") | SpatialPlot(HDBreast, group.by = "projected_annots_8um")
+```
+
+
+Here, we see some zones with higher CNV fractions than others. We can directly plot and test this:
+
+```{r plot_cnv_fraction2, fig.width=6, fig.height=4}
+library(ggplot2)
+ggplot(FetchData(HDBreast, vars = c("projected_annots_8um", "cnv_fraction")), 
+       aes(projected_annots_8um, cnv_fraction, fill = projected_annots_8um)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, color = "black"))
+```
+
+The tumor zone has a higher CNV fraction, which is coherent. 
+
+We can also plot the CNV per chromosome arm with the plotting functions from Seurat.
+
+```{r plot_cnv_per_chromosome, fig.width=7, fig.height=4}
+library(scales)
+
+SpatialFeaturePlot(HDBreast, features = "11.q_CNV")  +
+  scale_fill_distiller(palette = "RdBu", direction = -1, limits = c(-0.5, 0.5), 
+                       rescaler = function(x, to = c(0, 1), from = NULL) {
+                         rescale_mid(x, to = to, mid = 0)
+                       }) |
+SpatialFeaturePlot(HDBreast, features = "8.q_CNV") +
+  scale_fill_distiller(palette = "RdBu", direction = -1, limits = c(-0.5, 0.5), 
+                       rescaler = function(x, to = c(0, 1), from = NULL) {
+                         rescale_mid(x, to = to, mid = 0)
+                       })
+
+```
+
+
+## CNV clusters
+
+In addition to the CNV fraction, fastCNV can also compute the CNV clusters. These can be plotted with the Seurat plotting functions.
+
+
+```{r plot_cnv_clusters, fig.width=5, fig.height=4}
+HDBreast <- CNVCluster(HDBreast)
+HDBreast <- mergeCNVClusters(HDBreast, mergeThreshold = 0.95)
+
+SpatialDimPlot(HDBreast, group.by = "cnv_clusters") 
+```
+
+
+```{r cnv_props, fig.width=5, fig.height=4}
+library(ggplot2)
+library(SeuratObject)
+
+HDBreast$cnv_clusters <- as.factor(HDBreast$cnv_clusters)
+ggplot(FetchData(HDBreast, vars = c("cnv_clusters", "projected_annots_8um")), aes(projected_annots_8um, fill = cnv_clusters)) +
+  geom_bar(position = "fill") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, color = "black"))
+```
+
+Once we have the clusters, we can do the CNV heatmap again to visualize the clusters in it too.
+
+```{r cnvheatmapt_clusters, fig.width=8, fig.height=6}
+plotCNVResultsHD(HDBreast, referenceVar = "projected_annots_8um", printPlot = TRUE)
+```
+
+## CNV tree
+
+In this part of the vignette, we will show how to plot the CNV subclonality tree. CNV clusters are needed. 
+
+We build the tree, using `CNVTree()`. It contains the following functions : 
+
+  - `generateCNVClonesMatrix` will summarize `fastCNV()`'s results into a cluster/chromosome arm CNV matrix.
+
+  - `buildCNVTree()` will build the subclonality tree.
+  
+  - `annotateCNVTree()` will annotate each cnv gain/loss in the tree. 
+  
+  - `plotCNVTree()` will output the tree. 
+
+```{r tree_cnv, fig.width=7, fig.height=5}
+tree_data <- CNVTree(HDBreast, values ="calls", cnv_thresh = 0.09, healthyClusters = c("5","6"))
+
+
+```
