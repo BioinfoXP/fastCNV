@@ -51,14 +51,14 @@ while true; do
             echo -e "${GREEN}执行: git commit -m \"$msg\"${NC}"
             git commit -m "$msg"
             
-            echo -e "${GREEN}执行: git push origin $target_branch${NC}"
-            git push origin "$target_branch"
+            echo -e "${GREEN}执行: git push origin $BRANCH:$target_branch${NC}"
+            git push origin "$BRANCH:$target_branch"
             ;;
         4)
             read -p "请输入要推送的远程分支名 (直接回车默认 $BRANCH): " target_branch
             target_branch=${target_branch:-$BRANCH}
-            echo -e "${GREEN}执行: git push origin $target_branch${NC}"
-            git push origin "$target_branch"
+            echo -e "${GREEN}执行: git push origin $BRANCH:$target_branch${NC}"
+            git push origin "$BRANCH:$target_branch"
             ;;
         0)
             echo "Bye!"
