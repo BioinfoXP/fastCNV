@@ -29,159 +29,136 @@
 #' If given a **list** of Seurat objects, returns the modified list.
 #'
 #' @export
-
-
 CNVAnalysis <- function(object,
-                       referenceVar = NULL,
-                       referenceLabel = NULL,
-                       pooledReference = TRUE,
-                       scaleOnReferenceLabel = TRUE,
-                       assay = NULL,
-                       thresholdPercentile = 0.01,
-                       geneMetadata=getGenes(),
-                       windowSize=150,
-                       windowStep=10,
-                       saveGenomicWindows = FALSE,
-                       topNGenes=7000,
-                       chrArmsToForce = NULL,
-                       genesToForce = NULL,
-                       regionToForce = NULL) {
+                        referenceVar = NULL,
+                        referenceLabel = NULL,
+                        pooledReference = TRUE,
+                        scaleOnReferenceLabel = TRUE,
+                        assay = NULL,
+                        thresholdPercentile = 0.01,
+                        geneMetadata=getGenes(),
+                        windowSize=150,
+                        windowStep=10,
+                        saveGenomicWindows = FALSE,
+                        topNGenes=7000,
+                        chrArmsToForce = NULL,
+                        genesToForce = NULL,
+                        regionToForce = NULL) {
 
-    message(crayon::yellow(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Running CNV analysis...")))
-    if (!is.list(object)) {
-      object <- CNVCalling(object,
-                           assay = assay,
-                           referenceVar = referenceVar,
-                           referenceLabel = referenceLabel,
-                           scaleOnReferenceLabel = scaleOnReferenceLabel,
-                           thresholdPercentile = thresholdPercentile,
-                           geneMetadata=geneMetadata,
-                           windowSize=windowSize,
-                           windowStep=windowStep,
-                           saveGenomicWindows = saveGenomicWindows,
-                           topNGenes=topNGenes)
-      invisible(gc())
-    } else {
-      if (length(object) == 1) {
-        object <- list(CNVCalling(object[1],
-                                  assay = assay,
-                                  referenceVar = referenceVar,
-                                  referenceLabel = referenceLabel,
-                                  scaleOnReferenceLabel = scaleOnReferenceLabel,
-                                  thresholdPercentile = thresholdPercentile,
-                                  geneMetadata=geneMetadata,
-                                  windowSize=windowSize,
-                                  windowStep=windowStep,
-                                  saveGenomicWindows = saveGenomicWindows,
-                                  topNGenes=topNGenes))
-        invisible(gc())
+  message(crayon::yellow(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Running CNV analysis...")))
+
+  # --- 内部辅助函数：自动选择正确的 Assay ---
+  check_assay <- function(obj, current_assay) {
+    if (is.null(current_assay)) {
+      if ("AggregatedCounts" %in% Seurat::Assays(obj)) {
+        message(crayon::cyan("Note: Using 'AggregatedCounts' assay for CNV analysis."))
+        return("AggregatedCounts")
       } else {
-        if (pooledReference == TRUE) {
-          object <- CNVCallingList(object,
-                             assay = assay,
-                             referenceVar = referenceVar,
-                             referenceLabel = referenceLabel,
-                             scaleOnReferenceLabel = scaleOnReferenceLabel,
-                             thresholdPercentile = thresholdPercentile,
-                             geneMetadata=geneMetadata,
-                             windowSize=windowSize,
-                             windowStep=windowStep,
-                             saveGenomicWindows = saveGenomicWindows,
-                             topNGenes=topNGenes)
-          invisible(gc())
-        } else {
-          object <- lapply(object, function(x) {
-                                    CNVCalling(x,
-                                    assay = assay,
-                                    referenceVar = referenceVar,
-                                    referenceLabel = referenceLabel,
-                                    scaleOnReferenceLabel = scaleOnReferenceLabel,
-                                    thresholdPercentile = thresholdPercentile,
-                                    geneMetadata=geneMetadata,
-                                    windowSize=windowSize,
-                                    windowStep=windowStep,
-                                    saveGenomicWindows = saveGenomicWindows,
-                                    topNGenes=topNGenes) } )
-          invisible(gc())
-        }
-
-        # if (doRecapPlot == TRUE) {
-        #   message("Plotting the CNV recap heatmap per category accross samples. This could take some time.")
-        #   if (!is.null(referenceVar)) {
-        #   palette <- as.character(paletteer::paletteer_d("ggsci::default_igv"))
-        #   annot_colors <- setNames(palette[1:length(names(object))], names(object))
-        #   uni <- list()
-        #   for (i in names(object)){
-        #     uni[[i]] <- unique(object[[i]]@meta.data[[referenceVar]])
-        #   }
-        #   cellTypes <- unique(unlist(uni))
-        #   cellTypes <- cellTypes[nzchar(cellTypes)]
-        #
-        #   Lmat <- list()
-        #   for (i in cellTypes){
-        #     Lmat[[i]] <- lapply(object, function(x)
-        #       Seurat::Cells(x)[which(x@meta.data[[referenceVar]] == i)])
-        #     Lmat[[i]] <- Lmat[[i]][which(sapply(Lmat[[i]], length)>=5)]
-        #     for (j in names(Lmat[[i]])) {
-        #       Lmat[[i]][[j]] <- as.matrix(Seurat::GetAssay(object[[j]], assay = "genomicScores")["counts"])[,Lmat[[i]][[j]]]
-        #     }
-        #   }
-        #   Lhm <- list()
-        #   for (x in names(Lmat)) {
-        #     modified <- list()
-        #     sample_info <- data.frame(col_name = character(), sample = character(), stringsAsFactors = FALSE)
-        #     for (sample in names(Lmat[[x]])) {
-        #       matrix <- Lmat[[x]][[sample]]
-        #       col_names <- colnames(matrix)
-        #       new_col_names <- paste0(sample, "_", col_names)
-        #       colnames(matrix) <- new_col_names
-        #       modified[[sample]] <- rowMeans(matrix)
-        #
-        #       sample_info <- rbind(sample_info, data.frame(col_name = new_col_names, sample = sample))
-        #     }
-        #     rownames(sample_info) <- sample_info[,1]
-        #     sample_info[,1] <- NULL
-        #     combined <- t(do.call(cbind, modified))
-        #
-        #     sample_df <- as.data.frame(unique(sample_info))
-        #     rownames(sample_df) <- sample_df[,1]
-        #
-        #     Lhm[[x]] <- ComplexHeatmap::pheatmap(combined,
-        #                                          border=T,
-        #                                          border_color = NA,
-        #                                          use_raster = F,
-        #                                          cluster_cols = F,
-        #                                          show_rownames = F,
-        #                                          show_colnames = F,
-        #                                          clustering_distance_rows = "euclidean",
-        #                                          clustering_method = "ward.D",
-        #                                          column_split = as.numeric(sapply(strsplit(colnames(combined),".",fixed=T),function(z)z[1])),
-        #                                          row_split = sample_df,
-        #                                          annotation_row = sample_df,
-        #                                          annotation_colors = list(sample = annot_colors),
-        #                                          col=circlize::colorRamp2(c(-1, 0, 1), c("darkblue", "white", "darkred")))
-        #
-        #   }
-        #   output_file <- "heatmaps_per_annotation.pdf"
-        #
-        #   pdf(output_file, width = 20, height = 10)
-        #   for (i in seq_along(Lhm)){
-        #     grid::grid.newpage()
-        #     grid::pushViewport(grid::viewport(layout = grid::grid.layout(nrow = 2, heights = grid::unit.c(grid::unit(1, "cm"),grid::unit(1, "null")))))
-        #     grid::pushViewport(grid::viewport(layout.pos.row = 1))
-        #     grid::grid.text(paste0("CNV heatmap for annotation : ", names(Lhm)[i]), gp = grid::gpar(fontsize = 20))
-        #     grid::popViewport()
-        #     grid::pushViewport(grid::viewport(layout.pos.row = 2))
-        #     ComplexHeatmap::draw(Lhm[[i]], newpage = FALSE)
-        #     grid::popViewport()
-        #
-        #   }
-        #   dev.off()
-        # }
-        # }
-
+        d_assay <- Seurat::DefaultAssay(obj)
+        message(crayon::cyan(paste0("Note: 'AggregatedCounts' not found. Using default assay: '", d_assay, "'")))
+        return(d_assay)
       }
     }
+    return(current_assay)
+  }
+
+  # --- 内部辅助函数：检查 Reference 是否存在 ---
+  check_reference <- function(obj, ref_var, ref_labels) {
+    if (!is.null(ref_var)) {
+      if (!ref_var %in% colnames(obj@meta.data)) {
+        stop(paste0("Error: referenceVar '", ref_var, "' not found in metadata."))
+      }
+      if (!is.null(ref_labels)) {
+        found_cells <- sum(obj@meta.data[[ref_var]] %in% ref_labels)
+        if (found_cells == 0) {
+          stop(paste0("Error: No cells found matching referenceLabel(s): ", paste(ref_labels, collapse=", "), 
+                      " in column '", ref_var, "'."))
+        }
+      }
+    }
+  }
+  # ----------------------------------------------
+
+  if (!is.list(object)) {
+    # 单个对象处理
+    assay <- check_assay(object, assay)
+    check_reference(object, referenceVar, referenceLabel)
+    
+    object <- CNVCalling(object,
+                         assay = assay,
+                         referenceVar = referenceVar,
+                         referenceLabel = referenceLabel,
+                         scaleOnReferenceLabel = scaleOnReferenceLabel,
+                         thresholdPercentile = thresholdPercentile,
+                         geneMetadata=geneMetadata,
+                         windowSize=windowSize,
+                         windowStep=windowStep,
+                         saveGenomicWindows = saveGenomicWindows,
+                         topNGenes=topNGenes)
+    invisible(gc())
+    
+  } else {
+    # 列表对象处理
+    # 假设所有对象结构相似，检查第一个对象的 Assay
+    if (length(object) > 0) {
+      assay <- check_assay(object[[1]], assay)
+    }
+
+    if (length(object) == 1) {
+      check_reference(object[[1]], referenceVar, referenceLabel)
+      object <- list(CNVCalling(object[[1]],
+                                assay = assay,
+                                referenceVar = referenceVar,
+                                referenceLabel = referenceLabel,
+                                scaleOnReferenceLabel = scaleOnReferenceLabel,
+                                thresholdPercentile = thresholdPercentile,
+                                geneMetadata=geneMetadata,
+                                windowSize=windowSize,
+                                windowStep=windowStep,
+                                saveGenomicWindows = saveGenomicWindows,
+                                topNGenes=topNGenes))
+      invisible(gc())
+      
+    } else {
+      # 批量处理
+      if (pooledReference == TRUE) {
+        # 检查所有对象的 reference (可选，防止中间报错)
+        for (i in seq_along(object)) {
+             check_reference(object[[i]], referenceVar, referenceLabel)
+        }
+        
+        object <- CNVCallingList(object,
+                                 assay = assay,
+                                 referenceVar = referenceVar,
+                                 referenceLabel = referenceLabel,
+                                 scaleOnReferenceLabel = scaleOnReferenceLabel,
+                                 thresholdPercentile = thresholdPercentile,
+                                 geneMetadata=geneMetadata,
+                                 windowSize=windowSize,
+                                 windowStep=windowStep,
+                                 saveGenomicWindows = saveGenomicWindows,
+                                 topNGenes=topNGenes)
+        invisible(gc())
+        
+      } else {
+        object <- lapply(object, function(x) {
+          check_reference(x, referenceVar, referenceLabel)
+          CNVCalling(x,
+                     assay = assay,
+                     referenceVar = referenceVar,
+                     referenceLabel = referenceLabel,
+                     scaleOnReferenceLabel = scaleOnReferenceLabel,
+                     thresholdPercentile = thresholdPercentile,
+                     geneMetadata=geneMetadata,
+                     windowSize=windowSize,
+                     windowStep=windowStep,
+                     saveGenomicWindows = saveGenomicWindows,
+                     topNGenes=topNGenes) } )
+        invisible(gc())
+      }
+    }
+  }
+  
   message(crayon::green(paste0("[",format(Sys.time(), "%Y-%m-%d %H:%M:%S"),"]"," Done !")))
   return (object)
 }
